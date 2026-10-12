@@ -1,2 +1,3 @@
-# Зависимости торгового ядра и Telegram будут добавлены отдельными задачами.
-# Основа использует только стандартную библиотеку Python.
+# Telegram polling bot and environment configuration
+python-telegram-bot>=21.10,<23.0
+python-dotenv>=1.0,<2.0
