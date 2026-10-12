@@ -1,0 +1,8 @@
+{
+  "virtual_balance": "100",
+  "leverage": 10,
+  "capital_mode": "per_strategy",
+  "active_strategies": [],
+  "quote_currency": "USDT",
+  "note": "Safe example template; no secrets or live trading data."
+}

@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+logs/*
+!logs/.gitkeep
+data/*.json
+data/*.tmp*
+data/*.bak
+data/*.lock
+data/*.corrupt_*
+.pytest_cache/
+.coverage
+htmlcov/
