@@ -9,8 +9,7 @@ from telegram.ext import Application
 from telegram.request import HTTPXRequest
 
 from telegram_bot.handlers import register_handlers
-
-
+from telegram_bot.strategy_handlers import register_strategy_handlers
 # ============================================================
 # PATHS
 # ============================================================
@@ -91,10 +90,12 @@ def build_application() -> Application:
         .build()
     )
 
-    # Регистрация команд и постоянной клавиатуры.
     register_handlers(application)
 
-    logger.info("Обработчики Telegram зарегистрированы.")
+    register_strategy_handlers(application)
+
+    logger.info("Обработчики Telegram и менеджер стратегий зарегистрированы.")
+
 
     return application
 
@@ -111,7 +112,7 @@ def main() -> None:
 
     try:
         application.run_polling(
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
             drop_pending_updates=False,
             bootstrap_retries=5,
             close_loop=True,

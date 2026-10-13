@@ -393,6 +393,14 @@ def analyze(
     result = asdict(signal)
 
     result["current_price"] = current_price
+    result["swing_start_timestamp"] = (
+        candles[first_swing.index].get("timestamp")
+        if 0 <= first_swing.index < len(candles) else None
+    )
+    result["swing_end_timestamp"] = (
+        candles[last_swing.index].get("timestamp")
+        if 0 <= last_swing.index < len(candles) else None
+    )
     result["capital"] = float(capital)
     result["commission_per_side"] = COMMISSION_PER_SIDE
     result["initial_capital"] = INITIAL_CAPITAL

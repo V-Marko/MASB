@@ -193,19 +193,22 @@ async def clean_previous_messages(
             )
 
 
+
 async def send_tracked_message(
     chat_id: int,
     text: str,
     context: ContextTypes.DEFAULT_TYPE,
     with_keyboard: bool = True,
+    reply_markup=None,
 ):
-
     kwargs = {
         "chat_id": chat_id,
         "text": text,
     }
 
-    if with_keyboard:
+    if reply_markup is not None:
+        kwargs["reply_markup"] = reply_markup
+    elif with_keyboard:
         kwargs["reply_markup"] = main_keyboard()
 
     sent_message = await context.bot.send_message(**kwargs)
@@ -215,9 +218,54 @@ async def send_tracked_message(
     return sent_message
 
 
+
 # ============================================================
 # MENU TEXT
 # ============================================================
+
+
+def get_strategies_text() -> str:
+    """Формирует список стратегий из постоянного JSON-хранилища."""
+    try:
+        from services.strategy_manager import list_strategies
+
+        strategies = list_strategies()
+
+        if not strategies:
+            return (
+                "🧩 Стратегии MASB\n\n"
+                "Стратегии пока не зарегистрированы."
+            )
+
+        lines = ["🧩 Стратегии MASB", ""]
+
+        for name, info in strategies.items():
+            enabled = bool(info.get("enabled", False))
+            status = "🟢 Включена" if enabled else "⚪ Выключена"
+            signals = int(info.get("signals", 0))
+
+            lines.extend([
+                f"📌 {name}",
+                f"Статус: {status}",
+                f"Сигналов: {signals}",
+            ])
+
+            error = info.get("last_error")
+            if error:
+                lines.append(f"⚠️ Последняя ошибка: {str(error)[:300]}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except Exception:
+        logger.exception("Не удалось получить список стратегий")
+        return (
+            "🧩 Стратегии MASB\n\n"
+            "Не удалось загрузить список стратегий. "
+            "Проверь логи приложения."
+        )
+
 
 def get_section_text(
     section: str,
@@ -246,13 +294,7 @@ def get_section_text(
         )
 
     if section == BTN_STRATEGIES:
-        return context.application.bot_data.get(
-            "masb_strategies_text",
-            (
-                "🧩 Стратегии MASB\n\n"
-                "Список активных стратегий пока не подключён."
-            ),
-        )
+        return get_strategies_text()
 
     if section == BTN_HELP:
         return (
@@ -304,6 +346,13 @@ async def show_section(
         message.message_id,
         context,
     )
+
+    if section == BTN_STRATEGIES:
+        # Открываем интерактивную панель стратегий с inline-кнопками.
+        from telegram_bot.strategy_handlers import show_strategies_menu
+
+        await show_strategies_menu(update, context)
+        return
 
     text = get_section_text(section, context)
 

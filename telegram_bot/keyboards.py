@@ -30,6 +30,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
+        one_time_keyboard=False,
         is_persistent=True,
-        input_field_placeholder="Управление MASB...",
+        selective=False,
+        input_field_placeholder="Состояние • Баланс • Стратегии • Помощь",
     )
