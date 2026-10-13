@@ -1,4 +1,3 @@
-"""Базовая конфигурация MASB. Торговые правила здесь не задаются."""
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent

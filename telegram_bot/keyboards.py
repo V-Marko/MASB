@@ -1,18 +1,35 @@
-"""Кнопки главного меню Telegram."""
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ReplyKeyboardMarkup, KeyboardButton
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
+BTN_STATUS = "📊 Состояние"
+BTN_BALANCE = "💰 Баланс"
+BTN_STRATEGIES = "🧩 Стратегии"
+BTN_HELP = "❔ Помощь"
+BTN_HOME = "⬅️ Главное меню"
+
+MAIN_MENU_BUTTONS = {
+    BTN_STATUS,
+    BTN_BALANCE,
+    BTN_STRATEGIES,
+    BTN_HELP,
+    BTN_HOME,
+}
+
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
             [
-                InlineKeyboardButton("📊 Состояние", callback_data="status"),
-                InlineKeyboardButton("💰 Баланс", callback_data="balance"),
+                KeyboardButton(BTN_STATUS),
+                KeyboardButton(BTN_BALANCE),
             ],
             [
-                InlineKeyboardButton("🧩 Стратегии", callback_data="strategies"),
-                InlineKeyboardButton("❔ Помощь", callback_data="help"),
+                KeyboardButton(BTN_STRATEGIES),
+                KeyboardButton(BTN_HELP),
             ],
-        ]
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Управление MASB...",
     )

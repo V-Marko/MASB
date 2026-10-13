@@ -1,13 +1,3 @@
-"""JSON-хранилище MASB без СУБД.
-
-- UTF-8, атомарная замена через временный файл;
-- блокировка потоков и процессов на время операций с одним файлом;
-- резервная копия перед перезаписью важных файлов;
-- повреждённые файлы сохраняются для диагностики;
-- при восстановлении сначала проверяется резервная копия.
-
-Денежные значения рекомендуется передавать строками Decimal, а не float.
-"""
 from __future__ import annotations
 
 import json
@@ -34,15 +24,13 @@ _LOCKS: dict[str, threading.RLock] = {}
 
 
 class JsonStorageError(RuntimeError):
-    """Ошибка чтения, проверки или сохранения JSON-хранилища."""
+    print()
 
 
 class CorruptJsonError(JsonStorageError):
-    """JSON и его резервная копия не могут быть безопасно прочитаны."""
-
+    print()
 
 def json_default(value: Any) -> Any:
-    """Явное преобразование поддерживаемых специальных типов для JSON."""
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, (datetime, date)):
@@ -60,7 +48,6 @@ def _thread_lock(path: Path) -> threading.RLock:
 
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
-    """Блокировка на поток и процесс; файл блокировки остаётся на диске."""
     lock = _thread_lock(path)
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +80,6 @@ def _file_lock(path: Path) -> Iterator[None]:
 
 
 class JsonStorage:
-    """Хранит документы MASB в отдельных JSON-файлах."""
 
     def __init__(self, data_dir: Path | str | None = None):
         self.data_dir = Path(data_dir) if data_dir is not None else DATA_DIR
@@ -121,12 +107,6 @@ class JsonStorage:
         return target
 
     def load(self, key: str) -> Any:
-        """Загружает JSON; при повреждении пытается восстановить из .bak.
-
-        Повреждённый исходник переименовывается, а не удаляется. Если нет
-        исправной резервной копии, метод возбуждает CorruptJsonError — вызывающий
-        код должен явно решить, как продолжить, вместо молчаливого сброса состояния.
-        """
         path = self._path_for(key)
         with _file_lock(path):
             if not path.exists():

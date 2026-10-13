@@ -1,289 +1,418 @@
-"""Telegram-команды MASB с сохранением владельца и повтором запросов."""
-
-from __future__ import annotations
-
-import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from telegram import Update
-from telegram.constants import ChatType
-from telegram.error import NetworkError
-from telegram.ext import ContextTypes
-
-from config import DATA_DIR
-from telegram_bot.keyboards import main_menu
-from telegram_bot.messages import (
-    balance_message,
-    help_message,
-    status_message,
-    strategies_message,
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-logger = logging.getLogger(__name__)
+from telegram_bot.keyboards import (
+    BTN_STATUS,
+    BTN_BALANCE,
+    BTN_STRATEGIES,
+    BTN_HELP,
+    BTN_HOME,
+    MAIN_MENU_BUTTONS,
+    main_keyboard,
+)
+
+logger = logging.getLogger("MASB.telegram.handlers")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
 
 OWNER_FILE = DATA_DIR / "telegram_owner.json"
-MAX_SEND_ATTEMPTS = 4
+MESSAGES_FILE = DATA_DIR / "telegram_messages.json"
 
 
-def load_owner_id() -> int | None:
-    """Читает ID владельца. При повреждении файла безопасно останавливается."""
-    if not OWNER_FILE.exists():
+# ============================================================
+# JSON STORAGE
+# ============================================================
+
+def read_json(path: Path, default: Any) -> Any:
+    try:
+        if not path.exists():
+            return default
+
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Не удалось прочитать JSON: %s", path)
+        return default
+
+
+def write_json(path: Path, data: Any) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
+    temp_path.replace(path)
+
+
+# ============================================================
+# OWNER
+# ============================================================
+
+def get_owner_id() -> int | None:
+    data = read_json(OWNER_FILE, {})
+
+    if not isinstance(data, dict):
         return None
 
+    owner_id = data.get("owner_id")
+
     try:
-        data = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
-        owner_id = int(data["owner_user_id"])
-
-        if owner_id <= 0:
-            raise ValueError("Owner ID must be positive")
-
-        return owner_id
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"Cannot read {OWNER_FILE}. Do not delete or reset it blindly."
-        ) from exc
+        return int(owner_id) if owner_id is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
-def save_owner_id(owner_id: int) -> None:
-    """Атомарно сохраняет ID владельца."""
-    if owner_id <= 0:
-        raise ValueError("Owner ID must be positive")
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    temporary_file = OWNER_FILE.with_suffix(".tmp")
-
-    temporary_file.write_text(
-        json.dumps({"owner_user_id": owner_id}, indent=2) + "\n",
-        encoding="utf-8",
+def register_owner(user_id: int) -> None:
+    write_json(
+        OWNER_FILE,
+        {"owner_id": user_id},
     )
-    temporary_file.replace(OWNER_FILE)
 
 
-async def _retry_telegram(
-    operation: Callable[..., Any],
-    *args: Any,
-    **kwargs: Any,
-) -> Any | None:
-    """Повторяет Telegram-запрос при временных сетевых ошибках."""
-    for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
+def is_owner(update: Update) -> bool:
+    if update.effective_user is None:
+        return False
+
+    owner_id = get_owner_id()
+
+    return owner_id is not None and update.effective_user.id == owner_id
+
+
+# ============================================================
+# MESSAGE TRACKING
+# ============================================================
+
+def get_chat_messages(chat_id: int) -> list[int]:
+    data = read_json(MESSAGES_FILE, {})
+
+    if not isinstance(data, dict):
+        return []
+
+    messages = data.get(str(chat_id), [])
+
+    if not isinstance(messages, list):
+        return []
+
+    result = []
+
+    for message_id in messages:
         try:
-            return await operation(*args, **kwargs)
-        except NetworkError:
-            if attempt == MAX_SEND_ATTEMPTS:
-                logger.exception(
-                    "Telegram request failed after %s attempts.",
-                    MAX_SEND_ATTEMPTS,
-                )
-                return None
+            result.append(int(message_id))
+        except (TypeError, ValueError):
+            continue
 
-            delay = min(2 ** (attempt - 1), 8)
-            logger.warning(
-                "Telegram connection error; retry %s/%s in %s sec.",
-                attempt,
-                MAX_SEND_ATTEMPTS,
-                delay,
-            )
-            await asyncio.sleep(delay)
-
-    return None
+    return result
 
 
-def _is_private_chat(update: Update) -> bool:
-    chat = update.effective_chat
-    return bool(chat and chat.type == ChatType.PRIVATE)
+def save_chat_messages(chat_id: int, message_ids: list[int]) -> None:
+    data = read_json(MESSAGES_FILE, {})
+
+    if not isinstance(data, dict):
+        data = {}
+
+    # Удаляем дубликаты, сохраняя порядок.
+    unique_ids = list(dict.fromkeys(message_ids))
+
+    data[str(chat_id)] = unique_ids
+
+    write_json(MESSAGES_FILE, data)
 
 
-def _is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user = update.effective_user
-    owner_id = context.application.bot_data.get("owner_user_id")
+def add_tracked_message(chat_id: int, message_id: int) -> None:
+    messages = get_chat_messages(chat_id)
 
-    return bool(
-        _is_private_chat(update)
-        and user
-        and owner_id is not None
-        and user.id == owner_id
-    )
+    if message_id not in messages:
+        messages.append(message_id)
+
+    save_chat_messages(chat_id, messages)
 
 
-async def _deny(update: Update) -> None:
+async def track_user_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+
     message = update.effective_message
-    if message:
-        await _retry_telegram(
-            message.reply_text,
-            "⛔ Доступ запрещён. Управлять MASB может только владелец "
-            "в личном чате с ботом.",
+    chat = update.effective_chat
+
+    if message is None or chat is None:
+        return
+
+    add_tracked_message(chat.id, message.message_id)
+
+
+# ============================================================
+# CHAT CLEANUP
+# ============================================================
+
+async def clean_previous_messages(
+    chat_id: int,
+    keep_message_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+
+    old_message_ids = get_chat_messages(chat_id)
+
+
+    save_chat_messages(chat_id, [keep_message_id])
+
+    for message_id in old_message_ids:
+        if message_id == keep_message_id:
+            continue
+
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+
+        except TelegramError as error:
+            logger.debug(
+                "Не удалось удалить сообщение %s в чате %s: %s",
+                message_id,
+                chat_id,
+                error,
+            )
+
+
+async def send_tracked_message(
+    chat_id: int,
+    text: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    with_keyboard: bool = True,
+):
+
+    kwargs = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+
+    if with_keyboard:
+        kwargs["reply_markup"] = main_keyboard()
+
+    sent_message = await context.bot.send_message(**kwargs)
+
+    add_tracked_message(chat_id, sent_message.message_id)
+
+    return sent_message
+
+
+# ============================================================
+# MENU TEXT
+# ============================================================
+
+def get_section_text(
+    section: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> str:
+
+    if section == BTN_STATUS:
+        return context.application.bot_data.get(
+            "masb_status_text",
+            (
+                "📊 Состояние MASB\n\n"
+                "Бот запущен.\n"
+                "Подробная статистика появится после "
+                "подключения торгового модуля."
+            ),
         )
 
+    if section == BTN_BALANCE:
+        return context.application.bot_data.get(
+            "masb_balance_text",
+            (
+                "💰 Баланс MASB\n\n"
+                "Начальный виртуальный баланс: 100 USDT\n"
+                "Текущий баланс пока не подключён."
+            ),
+        )
+
+    if section == BTN_STRATEGIES:
+        return context.application.bot_data.get(
+            "masb_strategies_text",
+            (
+                "🧩 Стратегии MASB\n\n"
+                "Список активных стратегий пока не подключён."
+            ),
+        )
+
+    if section == BTN_HELP:
+        return (
+            "❔ Помощь\n\n"
+            "📊 Состояние — состояние бота\n"
+            "💰 Баланс — информация о балансе\n"
+            "🧩 Стратегии — список стратегий\n"
+            "❔ Помощь — эта инструкция\n\n"
+            "Выбирай раздел кнопками меню."
+        )
+
+    return "Главное меню MASB"
+
+
+# ============================================================
+# SHOW SECTION
+# ============================================================
+
+async def show_section(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    section: str,
+) -> None:
+
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if message is None or chat is None:
+        return
+
+    if not is_owner(update):
+        await clean_previous_messages(
+            chat.id,
+            message.message_id,
+            context,
+        )
+
+        await send_tracked_message(
+            chat.id,
+            "⛔ Доступ запрещён. Этот бот принадлежит другому пользователю.",
+            context,
+            with_keyboard=False,
+        )
+        return
+
+
+    await clean_previous_messages(
+        chat.id,
+        message.message_id,
+        context,
+    )
+
+    text = get_section_text(section, context)
+
+    await send_tracked_message(
+        chat.id,
+        text,
+        context,
+        with_keyboard=True,
+    )
+
+
+# ============================================================
+# /START
+# ============================================================
 
 async def cmd_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+
     message = update.effective_message
     user = update.effective_user
+    chat = update.effective_chat
 
-    if not message or not user:
+    if message is None or user is None or chat is None:
         return
 
-    if not _is_private_chat(update):
-        await _retry_telegram(
-            message.reply_text,
-            "Открой бота в личном чате, а не в группе.",
-        )
-        return
-
-    owner_id = context.application.bot_data.get("owner_user_id")
+    owner_id = get_owner_id()
 
     if owner_id is None:
-        try:
-            save_owner_id(user.id)
-        except OSError:
-            logger.exception("Could not save MASB owner.")
-            await _retry_telegram(
-                message.reply_text,
-                "❌ Не удалось сохранить владельца. Проверь права на папку data.",
-            )
-            return
+        register_owner(user.id)
+        logger.info("Зарегистрирован владелец Telegram ID: %s", user.id)
 
-        context.application.bot_data["owner_user_id"] = user.id
-        logger.warning("MASB owner registered. Telegram user ID: %s", user.id)
-
-    elif not _is_authorized(update, context):
-        await _deny(update)
-        return
-
-    # При первом запуске и при каждом следующем /start меню показывается одинаково.
-    await _retry_telegram(
-        message.reply_text,
-        "👋 *Добро пожаловать в MASB!*\n\n"
-        "Владелец зарегистрирован.\n"
-        "Выбери действие в меню ниже.\n\n"
-        "Пока доступны настройки и состояние. "
-        "Рыночные сигналы и реальные сделки не реализованы.",
-        parse_mode="Markdown",
-        reply_markup=main_menu(),
+    await show_section(
+        update,
+        context,
+        BTN_HOME,
     )
 
 
-async def cmd_help(
+# ============================================================
+# BUTTON HANDLER
+# ============================================================
+
+async def menu_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    if not _is_authorized(update, context):
-        await _deny(update)
+
+    message = update.effective_message
+
+    if message is None or not message.text:
         return
 
-    if update.effective_message:
-        await _retry_telegram(
-            update.effective_message.reply_text,
-            help_message(),
-            parse_mode="Markdown",
-            reply_markup=main_menu(),
-        )
+    text = message.text.strip()
 
-
-async def cmd_status(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    if not _is_authorized(update, context):
-        await _deny(update)
+    if text not in MAIN_MENU_BUTTONS:
         return
 
-    storage = context.application.bot_data["storage"]
-    text = status_message(
-        storage.load("config"),
-        storage.load("realtime_state"),
-    )
-
-    if update.effective_message:
-        await _retry_telegram(
-            update.effective_message.reply_text,
-            text,
-            parse_mode="Markdown",
-            reply_markup=main_menu(),
-        )
-
-
-async def cmd_balance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    if not _is_authorized(update, context):
-        await _deny(update)
-        return
-
-    config = context.application.bot_data["storage"].load("config")
-
-    if update.effective_message:
-        await _retry_telegram(
-            update.effective_message.reply_text,
-            balance_message(config),
-            parse_mode="Markdown",
-            reply_markup=main_menu(),
-        )
-
-
-async def cmd_strategies(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    if not _is_authorized(update, context):
-        await _deny(update)
-        return
-
-    config = context.application.bot_data["storage"].load("config")
-
-    if update.effective_message:
-        await _retry_telegram(
-            update.effective_message.reply_text,
-            strategies_message(config),
-            parse_mode="Markdown",
-            reply_markup=main_menu(),
-        )
-
-
-async def button_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    query = update.callback_query
-    if not query:
-        return
-
-    if not _is_authorized(update, context):
-        await _retry_telegram(
-            query.answer,
-            "Доступ запрещён",
-            show_alert=True,
-        )
-        return
-
-    answer_result = await _retry_telegram(query.answer)
-    if answer_result is None:
-        logger.warning("Could not acknowledge Telegram button press.")
-
-    storage = context.application.bot_data["storage"]
-    action = query.data
-
-    if action == "status":
-        text = status_message(
-            storage.load("config"),
-            storage.load("realtime_state"),
-        )
-    elif action == "balance":
-        text = balance_message(storage.load("config"))
-    elif action == "strategies":
-        text = strategies_message(storage.load("config"))
-    else:
-        text = help_message()
-
-    await _retry_telegram(
-        query.edit_message_text,
+    await show_section(
+        update,
+        context,
         text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(),
     )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    logger.error(
+        "Ошибка Telegram-обработчика",
+        exc_info=context.error,
+    )
+
+
+# ============================================================
+# REGISTER HANDLERS
+# ============================================================
+
+def register_handlers(application: Application) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    application.add_handler(
+        MessageHandler(
+            filters.ALL,
+            track_user_message,
+        ),
+        group=-1,
+    )
+
+    application.add_handler(
+        CommandHandler("start", cmd_start),
+        group=0,
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            menu_handler,
+        ),
+        group=0,
+    )
+
+    application.add_error_handler(error_handler)
+
+    logger.info("Обработчики MASB зарегистрированы.")

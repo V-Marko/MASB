@@ -1,4 +1,3 @@
-"""Форматирование сообщений MASB."""
 
 from typing import Any
 
