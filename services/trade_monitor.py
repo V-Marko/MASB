@@ -69,7 +69,6 @@ def add_signal_orders(
     signal: dict[str, Any],
     candle_timestamp: int,
 ) -> list[dict[str, Any]]:
-    """Persist pending virtual trades; the same setup is never duplicated."""
     created: list[dict[str, Any]] = []
     with _LOCK:
         data = _read()
@@ -182,114 +181,203 @@ def render_trade_chart(
     trade: dict[str, Any],
     phase: str = "SIGNAL",
 ) -> BytesIO:
-    """Draw a self-contained candlestick chart with Entry/TP/SL and Fib/ZigZag."""
+
     if not candles:
         raise ValueError("Для графика нет свечей")
-    visible = candles[-100:]
-    dates = [_candle_datetime(c) for c in visible]
-    x_values = mdates.date2num(dates)
-    fig, ax = plt.subplots(figsize=(12, 7), dpi=130)
-    fig.patch.set_facecolor("#111827")
-    ax.set_facecolor("#111827")
-    width = (x_values[-1] - x_values[0]) / max(30, len(x_values)) * 0.68 if len(x_values) > 1 else 0.02
 
-    for x, candle in zip(x_values, visible):
+    visible = candles[-160:]
+    dates = [_candle_datetime(c) for c in visible]
+    n = len(visible)
+    x_values = list(range(n))
+    right = n + max(12, n // 7)
+
+    bg = "#131722"
+    fg = "#d1d4dc"
+    grid = "#2a2e39"
+    up = "#26a69a"
+    down = "#ef5350"
+    entry_color = "#ff9800"
+    tp_color = "#26a69a"
+    sl_color = "#ef5350"
+    fib_color = "#b2b5be"
+    green_fib_color = "#00e676"
+
+    fig, ax = plt.subplots(figsize=(12, 7), dpi=120)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+
+    highs = [float(c["high"]) for c in visible]
+    lows = [float(c["low"]) for c in visible]
+    candle_span = (max(highs) - min(lows)) or max(abs(float(visible[-1]["close"])), 1.0) * 0.001
+    candle_width = 0.68
+    for i, candle in enumerate(visible):
         opn = float(candle["open"])
         high = float(candle["high"])
         low = float(candle["low"])
         close = float(candle["close"])
-        bullish = close >= opn
-        candle_color = "#22c55e" if bullish else "#ef4444"
-        ax.vlines(x, low, high, color=candle_color, linewidth=1.0, zorder=2)
-        bottom = min(opn, close)
-        height = max(abs(close - opn), max(abs(close), 1.0) * 0.00002)
-        ax.add_patch(Rectangle((x - width / 2, bottom), width, height,
-                               facecolor=candle_color, edgecolor=candle_color,
-                               linewidth=0.5, zorder=3))
+        color = up if close >= opn else down
+        ax.vlines(i, low, high, color=color, linewidth=0.85, zorder=2)
+        body = abs(close - opn) or candle_span * 0.0005
+        ax.bar(i, body, bottom=min(opn, close), width=candle_width,
+               color=color, edgecolor=color, linewidth=0.45, zorder=3)
+
+    def nearest_x(raw_timestamp: Any, fallback_index: int | None = None) -> int | None:
+        if raw_timestamp is not None:
+            try:
+                if isinstance(raw_timestamp, str) and not raw_timestamp.strip().replace(".", "", 1).isdigit():
+                    target = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+                    if target.tzinfo is None:
+                        target = target.replace(tzinfo=timezone.utc)
+                    else:
+                        target = target.astimezone(timezone.utc)
+                else:
+                    stamp = float(raw_timestamp)
+                    if stamp > 10_000_000_000:
+                        stamp /= 1000.0
+                    target = datetime.fromtimestamp(stamp, tz=timezone.utc)
+                idx = min(range(n), key=lambda j: abs((dates[j] - target).total_seconds()))
+                # One-hour tolerance matches the bot's 1h candles but also
+                # accepts an exact timestamp in the current candle.
+                if abs((dates[idx] - target).total_seconds()) <= 3600:
+                    return idx
+            except (TypeError, ValueError, OSError, OverflowError):
+                pass
+        if fallback_index is not None:
+            offset = max(0, len(candles) - n)
+            local = int(fallback_index) - offset
+            if 0 <= local < n:
+                return local
+        return None
+
+    start_x = nearest_x(trade.get("swing_start_timestamp"), trade.get("swing_start_index"))
+    end_x = nearest_x(trade.get("swing_end_timestamp"), trade.get("swing_end_index"))
+    swing_start = float(trade.get("swing_start") or 0.0)
+    swing_end = float(trade.get("swing_end") or 0.0)
+    if start_x is not None and end_x is not None and swing_start > 0 and swing_end > 0:
+        ax.plot([start_x, end_x], [swing_start, swing_end], color=entry_color,
+                linewidth=2.1, zorder=5, label="ZigZag")
+        ax.scatter([start_x, end_x], [swing_start, swing_end], marker="o", s=58,
+                   color=entry_color, edgecolors="#fff3e0", linewidths=0.8, zorder=6)
+        ax.annotate("ZZ start", (start_x, swing_start), xytext=(4, 7),
+                    textcoords="offset points", color=fg, fontsize=7)
+        ax.annotate("ZZ confirm", (end_x, swing_end), xytext=(4, 7),
+                    textcoords="offset points", color=fg, fontsize=7)
+
+    levels: dict[float, dict[str, Any]] = {}
+
+    def add_level(price: Any, label: str, color: str, style: str, width: float, priority: int) -> None:
+        try:
+            value = float(price)
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        key = round(value, 10)
+        current = levels.setdefault(key, {"price": value, "labels": [], "color": color,
+                                          "style": style, "width": width, "priority": -1})
+        if label not in current["labels"]:
+            current["labels"].append(label)
+        if priority >= current["priority"]:
+            current.update(color=color, style=style, width=width, priority=priority)
+
+    for level, price in (trade.get("fibonacci") or {}).items():
+        add_level(price, f"Fib {level}", fib_color, "-", 0.75, 0)
+    for level, price in (trade.get("green_fibonacci") or {}).items():
+        add_level(price, f"Green Fib {level}", green_fib_color, "--", 0.9, 1)
 
     entry = float(trade["entry"])
     tp = float(trade["tp"])
     sl = float(trade["sl"])
-    ax.axhline(entry, color="#f59e0b", linewidth=2.0, linestyle="-", label=f"ENTRY {entry:.8g}")
-    ax.axhline(tp, color="#22c55e", linewidth=2.0, linestyle="--", label=f"TP {tp:.8g}")
-    ax.axhline(sl, color="#ef4444", linewidth=2.0, linestyle="--", label=f"SL {sl:.8g}")
+    add_level(entry, f"ENTRY {trade.get('entry_number', 1)}", entry_color, "-", 2.2, 4)
+    add_level(tp, "TP", tp_color, ":", 1.9, 3)
+    add_level(sl, "SL", sl_color, ":", 1.9, 3)
 
-    # Show Fibonacci retracement/extension levels used by fibZZ10.
-    fibs = trade.get("fibonacci", {})
-    for level, price in fibs.items():
-        try:
-            level_price = float(price)
-        except (TypeError, ValueError):
-            continue
-        ax.axhline(level_price, color="#94a3b8", linewidth=0.7, alpha=0.35)
-        ax.text(x_values[-1], level_price, f" Fib {level}", color="#cbd5e1", fontsize=7,
-                va="bottom", ha="right", alpha=0.8)
+    closed = phase in {"TP", "SL"} or trade.get("status") in {"TP", "SL"}
+    exit_price = trade.get("exit_price")
+    if closed and exit_price is not None:
+        exit_price = float(exit_price)
+        add_level(exit_price, "EXIT", tp_color if phase == "TP" else sl_color, "--", 1.8, 5)
 
-    # Mark ZigZag swing pivots using their timestamps, so later charts still align.
-    start_i = int(trade.get("swing_start_index", -1))
-    end_i = int(trade.get("swing_end_index", -1))
-    offset = max(0, len(candles) - len(visible))
-    pivot_specs = [
-        (trade.get("swing_start_timestamp"), start_i, float(trade.get("swing_start", 0)), "o", "ZigZag start"),
-        (trade.get("swing_end_timestamp"), end_i, float(trade.get("swing_end", 0)), "D", "ZigZag confirm"),
-    ]
-    for pivot_timestamp, idx, price, marker, label in pivot_specs:
-        local = None
-        if pivot_timestamp is not None:
-            try:
-                pivot_ms = int(pivot_timestamp)
-                if pivot_ms > 10_000_000_000:
-                    pivot_ms //= 1000
-                pivot_dt = datetime.fromtimestamp(pivot_ms, tz=timezone.utc)
-                nearest = min(range(len(dates)), key=lambda i: abs((dates[i] - pivot_dt).total_seconds()))
-                if abs((dates[nearest] - pivot_dt).total_seconds()) <= 3600:
-                    local = nearest
-            except (TypeError, ValueError, OSError):
-                local = None
-        if local is None:
-            local = idx - offset
-        if 0 <= local < len(x_values) and price > 0:
-            ax.scatter([x_values[local]], [price], marker=marker, s=70,
-                       color="#38bdf8", edgecolors="#e0f2fe", linewidths=0.8,
-                       zorder=5, label=label)
+    for level in levels.values():
+        ax.plot([max(0, end_x if end_x is not None else n - 1), right - 1],
+                [level["price"], level["price"]], color=level["color"],
+                linestyle=level["style"], linewidth=level["width"], zorder=4)
+        ax.text(right - 0.5, level["price"],
+                f" {' · '.join(level['labels'])}  {level['price']:.8g}",
+                color=level["color"], va="center", ha="left", fontsize=8.0)
 
-    green_fibs = trade.get("green_fibonacci", {})
-    for level, price in green_fibs.items():
-        try:
-            level_price = float(price)
-        except (TypeError, ValueError):
-            continue
-        ax.axhline(level_price, color="#4ade80", linewidth=0.7, alpha=0.3, linestyle=":")
-        ax.text(x_values[-1], level_price, f" Green Fib {level}", color="#86efac", fontsize=7,
-                va="bottom", ha="right", alpha=0.8)
+    # Show the fill and the final exit on the relevant candle. This makes the
+    # TP and especially the SL result chart distinct from the initial signal.
+    entry_x = nearest_x(trade.get("entry_time"))
+    if entry_x is None:
+        entry_x = max(0, min(n - 1, end_x if end_x is not None else n - 1))
+    if phase in {"ENTRY", "TP", "SL"}:
+        ax.scatter([entry_x], [entry], marker="^" if trade.get("direction") == "LONG" else "v",
+                   s=145, color=entry_color, edgecolors="#fff3e0", linewidths=0.9,
+                   zorder=7, label="ENTRY filled")
+
+    if closed and exit_price is not None:
+        exit_x = n - 1
+        exit_color = tp_color if phase == "TP" else sl_color
+        ax.plot([entry_x, exit_x], [entry, exit_price], color=entry_color,
+                linewidth=1.6, alpha=0.9, zorder=5)
+        ax.scatter([exit_x], [exit_price], marker="*", s=250, color=exit_color,
+                   edgecolors="#ffffff", linewidths=0.7, zorder=8,
+                   label="TP EXIT" if phase == "TP" else "SL EXIT")
+        ax.annotate("TP HIT" if phase == "TP" else "SL HIT", (exit_x, exit_price),
+                    xytext=(6, 10 if phase == "TP" else -16), textcoords="offset points",
+                    color=exit_color, fontsize=10, fontweight="bold")
 
     phase_titles = {
-        "SIGNAL": "SIGNAL / ОЖИДАНИЕ ENTRY",
-        "ENTRY": "ENTRY ДОСТИГНУТ — ВИРТУАЛЬНЫЙ ВХОД",
+        "SIGNAL": "НОВЫЙ СИГНАЛ · ОЖИДАНИЕ ENTRY",
+        "ENTRY": "ENTRY ДОСТИГНУТ · ВИРТУАЛЬНЫЙ ВХОД",
         "TP": "TAKE PROFIT ДОСТИГНУТ",
         "SL": "STOP LOSS ДОСТИГНУТ",
     }
-    ax.set_title(f"MASB | {trade.get('symbol', '')} | {trade.get('strategy', '')} | {phase_titles.get(phase, phase)}",
-                 color="white", fontsize=12, pad=14, weight="bold")
-    ax.set_ylabel("Цена (USDT)", color="#e5e7eb")
-    ax.tick_params(axis="x", colors="#cbd5e1", labelsize=8)
-    ax.tick_params(axis="y", colors="#cbd5e1", labelsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%H:%M", tz=timezone.utc))
-    ax.grid(True, color="#334155", alpha=0.5, linewidth=0.5)
+    side = str(trade.get("direction", ""))
+    result_suffix = ""
+    if closed:
+        try:
+            result_suffix = f" · PnL {float(trade.get('pnl_net') or 0.0):+.4f} USDT"
+        except (TypeError, ValueError):
+            result_suffix = ""
+    ax.set_title(
+        f"{trade.get('symbol', '')} · 1h · {side} · {trade.get('strategy', '')} · "
+        f"{phase_titles.get(phase, phase)}{result_suffix}",
+        color=fg, fontsize=11, pad=14, fontweight="bold",
+    )
+    ax.set_ylabel("Цена (USDT)", color=fg)
+    tick_step = max(1, n // 8)
+    ticks = list(range(0, n, tick_step))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([dates[i].strftime("%d.%m %H:%M") for i in ticks], color=fg, fontsize=8)
+    ax.tick_params(axis="y", colors=fg, labelsize=8)
+    ax.grid(color=grid, linewidth=0.5, alpha=0.9)
     for spine in ax.spines.values():
-        spine.set_color("#475569")
-    legend = ax.legend(loc="upper left", fontsize=8, facecolor="#1f2937", edgecolor="#475569")
-    for text_item in legend.get_texts():
-        text_item.set_color("white")
-    ax.margins(x=0.03, y=0.12)
+        spine.set_color(grid)
+
+    all_prices = lows + highs + [v["price"] for v in levels.values()]
+    if swing_start > 0:
+        all_prices.append(swing_start)
+    if swing_end > 0:
+        all_prices.append(swing_end)
+    if exit_price is not None and closed:
+        all_prices.append(float(exit_price))
+    low_y, high_y = min(all_prices), max(all_prices)
+    pad = (high_y - low_y) * 0.07 or max(abs(high_y), 1.0) * 0.002
+    ax.set_ylim(low_y - pad, high_y + pad)
+    ax.set_xlim(-1, right + max(12, n // 5))
+    legend = ax.legend(loc="upper left", fontsize=8, facecolor="#1f2937", edgecolor=grid)
+    for legend_text in legend.get_texts():
+        legend_text.set_color("white")
     fig.tight_layout()
+
     output = BytesIO()
     fig.savefig(output, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
     output.seek(0)
     output.name = f"{trade.get('symbol', 'MASB')}_{phase.lower()}.png"
     return output
-
 
 def entry_hit(trade: dict[str, Any], candle: dict[str, Any]) -> bool:
     low, high = float(candle["low"]), float(candle["high"])
@@ -298,7 +386,6 @@ def entry_hit(trade: dict[str, Any], candle: dict[str, Any]) -> bool:
 
 
 def touched_exit(trade: dict[str, Any], candle: dict[str, Any]) -> str | None:
-    """If TP and SL touch the same candle, always return SL (conservative rule)."""
     low, high = float(candle["low"]), float(candle["high"])
     if trade["direction"] == "LONG":
         sl_hit = low <= float(trade["sl"])

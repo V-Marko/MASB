@@ -1,6 +1,6 @@
 import unittest
 
-from services.trade_monitor import close_trade, entry_hit, touched_exit
+from services.trade_monitor import close_trade, entry_hit, touched_exit, render_trade_chart
 
 
 class TradeMonitorTests(unittest.TestCase):
@@ -37,6 +37,43 @@ class TradeMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(result["pnl_gross"], 5.0)
         self.assertGreater(result["fees"], 0.0)
         self.assertLess(result["pnl_net"], result["pnl_gross"])
+
+    def test_stop_loss_chart_is_generated_with_exit_marker_data(self):
+        from datetime import datetime, timezone
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        candles = []
+        for i in range(40):
+            base = 100 + (i % 7) * 0.25
+            candles.append({
+                "timestamp": now_ms - (39 - i) * 3_600_000,
+                "open": base,
+                "high": base + 1.0,
+                "low": base - 1.0,
+                "close": base + 0.25,
+                "volume": 100,
+            })
+        trade = {
+            **self.trade,
+            "symbol": "BTCUSDT",
+            "strategy": "fibZZ10",
+            "status": "SL",
+            "entry_time": datetime.now(timezone.utc).isoformat(),
+            "exit_price": 95.0,
+            "exit_time": datetime.now(timezone.utc).isoformat(),
+            "pnl_net": -2.75,
+            "entry_number": 1,
+            "swing_start": 95.0,
+            "swing_end": 105.0,
+            "swing_start_index": 10,
+            "swing_end_index": 20,
+            "swing_start_timestamp": candles[10]["timestamp"],
+            "swing_end_timestamp": candles[20]["timestamp"],
+            "fibonacci": {"0.618": 101.0},
+            "green_fibonacci": {"0.382": 108.0},
+        }
+        chart = render_trade_chart(candles, trade, "SL")
+        self.assertEqual(chart.read(8), b"\x89PNG\r\n\x1a\n")
+        self.assertIn("sl", chart.name.lower())
 
 
 if __name__ == "__main__":

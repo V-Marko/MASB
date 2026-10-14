@@ -225,7 +225,6 @@ async def send_tracked_message(
 
 
 def get_strategies_text() -> str:
-    """Формирует список стратегий из постоянного JSON-хранилища."""
     try:
         from services.strategy_manager import list_strategies
 

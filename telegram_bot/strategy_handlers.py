@@ -646,6 +646,18 @@ async def cmd_strategy_status(
 # SCANNER
 # ============================================================
 
+async def _event_chart_candles(
+    symbol: str,
+    fallback: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        history = await asyncio.to_thread(get_klines, symbol, 180, include_current=True)
+        return history or fallback
+    except Exception:
+        logger.exception("Не удалось загрузить расширенную историю для графика %s", symbol)
+        return fallback
+
+
 async def _send_trade_chart(
     application: Application,
     trade: dict[str, Any],
@@ -730,7 +742,6 @@ async def _scan_strategy(
 
 
 async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check live/current Binance candle highs and lows for entry, TP and SL."""
     application = context.application
     trades = active_trades()
     if not trades:
@@ -773,7 +784,8 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"Entry: {trade['entry']:.8g}\n🟢 TP: {trade['tp']:.8g}\n🔴 SL: {trade['sl']:.8g}\n"
                     "Виртуальная позиция открыта."
                 )
-                await _send_trade_chart(application, trade, candles, "ENTRY", caption)
+                chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
+                await _send_trade_chart(application, trade, chart_candles, "ENTRY", caption)
             elif trade["status"] == "PENDING":
                 trade = update_trade(trade["id"], {"last_checked_candle": candle_ts}) or trade
 
@@ -794,7 +806,9 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"PnL net: {float(trade.get('pnl_net') or 0):+.4f} USDT\n"
                         "Результат виртуальной сделки."
                     )
-                    await _send_trade_chart(application, trade, candles, outcome, caption)
+                    # TP and SL always get their own final chart with an EXIT marker.
+                    chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
+                    await _send_trade_chart(application, trade, chart_candles, outcome, caption)
                     break
                 trade = update_trade(trade["id"], {"last_checked_candle": candle_ts}) or trade
 

@@ -166,7 +166,6 @@ def get_symbols() -> list[str]:
 
 
 def add_strategy(name: str) -> None:
-    """Регистрирует новую стратегию без изменения остальных."""
     with _LOCK:
         state = _read_state()
 
