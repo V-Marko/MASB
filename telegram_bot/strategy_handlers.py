@@ -32,7 +32,7 @@ from services.strategy_manager import (
     set_strategy_enabled,
 )
 
-from strategy import fibZZ10
+from strategy.registry import discover_strategies
 from services.trade_monitor import (
     active_trades,
     add_signal_orders,
@@ -54,14 +54,10 @@ SETTINGS_FILE = DATA_DIR / "strategy_settings.json"
 
 INITIAL_VIRTUAL_BALANCE = 100.0
 
-# Добавляй новые стратегии сюда.
-STRATEGIES: dict[str, Callable[..., Any]] = {
-    "fibZZ10": fibZZ10.analyze,
-}
-
-STRATEGY_FORMATTERS = {
-    "fibZZ10": fibZZ10.format_signal,
-}
+# Стратегии подхватываются автоматически из папки strategy/ (см. strategy/registry.py).
+STRATEGIES: dict[str, Callable[..., Any]]
+STRATEGY_FORMATTERS: dict[str, Callable[[dict[str, Any] | None], str]]
+STRATEGIES, STRATEGY_FORMATTERS, _ = discover_strategies()
 
 
 # ============================================================
@@ -415,6 +411,279 @@ async def show_strategies_menu(
     )
 
 
+
+
+# ============================================================
+# BALANCE / PNL / TRADE HISTORY MENUS
+# ============================================================
+
+def balance_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 PnL", callback_data="masb:report:pnl"),
+            InlineKeyboardButton("📜 История сделок", callback_data="masb:report:history"),
+        ],
+        [InlineKeyboardButton("🧩 Стратегии", callback_data="masb:list")],
+    ])
+
+
+def report_strategy_keyboard(report_type: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("🌐 Все стратегии", callback_data=f"masb:reportview:{report_type}:all")]]
+    for name in list_strategies():
+        rows.append([InlineKeyboardButton(name, callback_data=f"masb:reportview:{report_type}:{name}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад к балансу", callback_data="masb:balancehome")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_balance_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram_bot.handlers import send_tracked_message
+    await send_tracked_message(
+        chat_id,
+        "💰 Баланс MASB\n\n"
+        "Начальный виртуальный баланс: 100 USDT\n"
+        "Выбери, что посмотреть. Для PnL и истории можно выбрать отдельную стратегию или все стратегии сразу.",
+        context,
+        with_keyboard=False,
+        reply_markup=balance_menu_keyboard(),
+    )
+    from telegram_bot.keyboards import main_keyboard
+    await send_tracked_message(
+        chat_id,
+        "📌 Основное меню MASB закреплено снизу.",
+        context,
+        with_keyboard=False,
+        reply_markup=main_keyboard(),
+    )
+
+
+def pnl_report_text(strategy_name: str | None) -> str:
+    stats = trade_stats(strategy_name)
+
+    title = (
+        "Все стратегии"
+        if strategy_name is None
+        else strategy_name
+    )
+
+    # Считаем статусы по сделкам с учётом выбранной стратегии.
+    trades = all_trades()
+
+    if strategy_name is not None:
+        trades = [
+            trade for trade in trades
+            if trade.get("strategy") == strategy_name
+        ]
+
+    wins = sum(
+        1 for trade in trades
+        if str(trade.get("status", "")).upper() == "TP"
+    )
+
+    losses = sum(
+        1 for trade in trades
+        if str(trade.get("status", "")).upper() == "SL"
+    )
+
+    pending = sum(
+        1 for trade in trades
+        if str(trade.get("status", "")).upper() == "PENDING"
+    )
+
+    opened = sum(
+        1 for trade in trades
+        if str(trade.get("status", "")).upper() == "OPEN"
+    )
+
+    pnl = float(stats.get("pnl_net", 0.0) or 0.0)
+
+    pnl_emoji = (
+        "🟢" if pnl > 0
+        else "🔴" if pnl < 0
+        else "⚪"
+    )
+
+    return (
+        f"📈 PnL — {title}\n\n"
+        f"💵 Начальный баланс: {INITIAL_VIRTUAL_BALANCE:.2f} USDT\n"
+        f"💰 Текущий виртуальный баланс: {stats['balance']:.4f} USDT\n"
+        f"📊 Реализованный PnL: {pnl_emoji} {pnl:+.4f} USDT\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📋 СТАТИСТИКА СДЕЛОК\n\n"
+        f"✅ TP: {wins}\n"
+        f"❌ SL: {losses}\n"
+        f"⏳ PENDING: {pending}\n"
+        f"🟠 OPEN: {opened}\n"
+        f"📚 Всего сделок: {len(trades)}\n\n"
+        f"🎯 Win rate: {stats['win_rate']:.1f}%\n\n"
+        "Учёт виртуальный; реальные ордера не отправляются."
+    )
+
+async def _refresh_open_trade_prices(trades: list[dict[str, Any]]) -> None:
+    """Обновить текущие цены открытых позиций перед расчётом плавающего PnL."""
+    symbols = sorted({
+        str(trade.get("symbol", "")).upper()
+        for trade in trades
+        if trade.get("status") == "OPEN" and trade.get("symbol")
+    })
+    prices: dict[str, float] = {}
+    for symbol in symbols:
+        try:
+            candles = await asyncio.to_thread(get_klines, symbol, 3, include_current=True)
+            if candles:
+                prices[symbol] = float(candles[-1]["close"])
+        except Exception:
+            logger.exception("Не удалось обновить цену %s для PnL", symbol)
+
+    if not prices:
+        return
+    for trade in trades:
+        symbol = str(trade.get("symbol", "")).upper()
+        if trade.get("status") == "OPEN" and symbol in prices:
+            trade["current_price"] = prices[symbol]
+            update_trade(str(trade.get("id", "")), {"current_price": prices[symbol]})
+
+
+def pnl_open_trades_text(strategy_name: str | None) -> tuple[str, InlineKeyboardMarkup]:
+    """Сформировать карточки открытых/ожидающих сделок и кнопки графиков."""
+    trades = active_trades(strategy_name)
+    trades = list(reversed(trades[-30:]))
+    title = "Все стратегии" if strategy_name is None else strategy_name
+    lines = [f"\n\n🟠 Открытые сделки — {title}"]
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if not trades:
+        lines.append("\nОткрытых сделок нет.")
+    else:
+        lines.append("\nПоказаны активные сделки (OPEN и ожидающие входа PENDING):\n")
+        for trade in trades:
+            raw_date = str(trade.get("created_at") or "")
+            try:
+                parsed = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                date_text = parsed.astimezone().strftime("%d.%m.%Y")
+            except (ValueError, TypeError):
+                date_text = "не указано"
+            status = str(trade.get("status", "PENDING"))
+            if status == "PENDING":
+                pnl_text = "ожидает входа"
+            else:
+                current_price = trade.get("current_price")
+                if current_price is not None:
+                    entry = float(trade.get("actual_entry") or trade.get("entry") or 0.0)
+                    quantity = float(trade.get("quantity") or 0.0)
+                    sign = 1.0 if trade.get("direction") == "LONG" else -1.0
+                    gross = (float(current_price) - entry) * quantity * sign
+                    estimated_fees = (entry * quantity + float(current_price) * quantity) * 0.00055
+                    pnl_text = f"{gross - estimated_fees:+.4f} USDT (плавающий)"
+                else:
+                    pnl_text = "нет текущей цены"
+            lines.append(
+                f"📅 Дата — {date_text}\n"
+                f"🪙 Монета — {trade.get('symbol', '?')} ({trade.get('direction', '?')})\n"
+                f"🎯 TP — {float(trade.get('tp') or 0):.8g}\n"
+                f"🛑 SL — {float(trade.get('sl') or 0):.8g}\n"
+                f"📊 PnL — {pnl_text}\n"
+                f"Статус — {'Открыта' if status == 'OPEN' else 'Ожидает входа'}\n"
+                f"Стратегия — {trade.get('strategy', '?')}\n"
+            )
+            rows.append([InlineKeyboardButton(
+                f"📈 График {trade.get('symbol', '?')} · {trade.get('direction', '?')}",
+                callback_data=f"masb:reportchart:{trade.get('id', '')}",
+            )])
+    rows.extend([
+        [InlineKeyboardButton("🔄 Обновить", callback_data=f"masb:reportview:pnl:{'all' if strategy_name is None else strategy_name}")],
+        [InlineKeyboardButton("⬅️ Выбрать стратегию", callback_data="masb:report:pnl")],
+        [InlineKeyboardButton("⬅️ К балансу", callback_data="masb:balancehome")],
+    ])
+    return "\n".join(lines)[:2500], InlineKeyboardMarkup(rows)
+
+
+def history_report_messages(
+    strategy_name: str | None,
+    trades_per_message: int = 10,
+) -> list[str]:
+    """Сформировать историю сообщениями: сводка + не более 10 сделок в каждом."""
+    all_matching_trades = all_trades()
+    if strategy_name is not None:
+        all_matching_trades = [
+            trade for trade in all_matching_trades
+            if trade.get("strategy") == strategy_name
+        ]
+
+    title = "Все стратегии" if strategy_name is None else strategy_name
+    wins = sum(1 for t in all_matching_trades if str(t.get("status", "")).upper() == "TP")
+    losses = sum(1 for t in all_matching_trades if str(t.get("status", "")).upper() == "SL")
+    pending = sum(1 for t in all_matching_trades if str(t.get("status", "")).upper() == "PENDING")
+    opened = sum(1 for t in all_matching_trades if str(t.get("status", "")).upper() == "OPEN")
+    closed = [t for t in all_matching_trades if str(t.get("status", "")).upper() in {"TP", "SL"}]
+    total_pnl = sum(float(t.get("pnl_net") or 0.0) for t in closed)
+    win_rate = (wins / len(closed) * 100.0) if closed else 0.0
+    pnl_emoji = "🟢" if total_pnl > 0 else "🔴" if total_pnl < 0 else "⚪"
+
+    summary = "\n".join([
+        f"📜 История заявок — {title}",
+        "",
+        "📊 ОБЩАЯ СТАТИСТИКА ПО ВСЕЙ ИСТОРИИ",
+        f"💰 Реализованный PnL: {pnl_emoji} {total_pnl:+.4f} USDT",
+        f"✅ TP: {wins}",
+        f"❌ SL: {losses}",
+        f"⏳ PENDING: {pending}",
+        f"🟠 OPEN: {opened}",
+        f"📋 Всего заявок: {len(all_matching_trades)}",
+        f"🎯 Win rate: {win_rate:.1f}%",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        f"🧾 ИСТОРИЯ ЗАЯВОК (по {trades_per_message} в сообщении)",
+    ])
+
+    # Показываем всю историю, начиная с самых новых сделок.
+    recent_trades = list(reversed(all_matching_trades))
+    pnl_footer = (
+        "\n\n━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ИТОГОВЫЙ PnL — {title}\n"
+        f"{pnl_emoji} Реализованный PnL после комиссий: {total_pnl:+.4f} USDT\n"
+        f"Закрытых сделок учтено: {len(closed)}"
+    )
+
+    if not recent_trades:
+        return [summary + "\n\nЗаявок пока нет." + pnl_footer]
+
+    trade_blocks: list[str] = []
+    for index, trade in enumerate(recent_trades, start=1):
+        status = str(trade.get("status", "UNKNOWN")).upper()
+        emoji = "✅" if status == "TP" else "❌" if status == "SL" else "⏳" if status == "PENDING" else "🟠" if status == "OPEN" else "⚪"
+        pnl = trade.get("pnl_net")
+        try:
+            pnl_value = float(pnl) if pnl is not None else None
+        except (ValueError, TypeError):
+            pnl_value = None
+        pnl_text = (
+            f"{pnl_value:+.4f} USDT"
+            if pnl_value is not None
+            else ("плавающий / ещё не реализован" if status == "OPEN" else "—")
+        )
+        created_raw = str(trade.get("created_at") or "")
+        try:
+            created = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            created = created_raw[:10] or "не указано"
+        trade_blocks.append(
+            f"{index}. {emoji} {trade.get('symbol', '?')} {trade.get('direction', '?')} — {status}\n"
+            f"Дата: {created} | Стратегия: {trade.get('strategy', '?')}\n"
+            f"Entry: {float(trade.get('actual_entry') or trade.get('entry') or 0):.8g}\n"
+            f"TP: {float(trade.get('tp') or 0):.8g} | SL: {float(trade.get('sl') or 0):.8g}\n"
+            f"PnL: {pnl_text}"
+        )
+
+    messages: list[str] = []
+    for offset in range(0, len(trade_blocks), trades_per_message):
+        batch = trade_blocks[offset:offset + trades_per_message]
+        header = summary if offset == 0 else f"📜 История заявок — {title}\nПродолжение: заявки {offset + 1}–{offset + len(batch)} из {len(trade_blocks)}"
+        messages.append(header + "\n\n" + "\n\n".join(batch))
+
+    # Итоговый PnL размещаем в самом конце всей истории, после последней порции сделок.
+    messages[-1] += pnl_footer
+    return messages
+
 # ============================================================
 # CALLBACK BUTTON HANDLER
 # ============================================================
@@ -444,6 +713,80 @@ async def strategy_callback(
             text=strategies_text(),
             reply_markup=strategies_keyboard(),
         )
+        return
+
+    if data == "masb:balancehome":
+        await query.edit_message_text(
+            "💰 Баланс MASB\n\nНачальный виртуальный баланс: 100 USDT\nВыбери PnL или историю сделок.",
+            reply_markup=balance_menu_keyboard(),
+        )
+        return
+
+    if data in {"masb:report:pnl", "masb:report:history"}:
+        report_type = data.rsplit(":", 1)[1]
+        title = "PnL" if report_type == "pnl" else "историю сделок"
+        await query.edit_message_text(
+            f"Выбери стратегию, для которой показать {title}, или все стратегии сразу:",
+            reply_markup=report_strategy_keyboard(report_type),
+        )
+        return
+
+    if data.startswith("masb:reportchart:"):
+        trade_id = data.split(":", maxsplit=2)[2]
+        trade = next((item for item in all_trades() if str(item.get("id")) == trade_id), None)
+        if not trade or trade.get("status") not in {"OPEN", "PENDING"}:
+            await query.answer("Эта сделка больше не открыта.", show_alert=True)
+            return
+        try:
+            candles = await asyncio.to_thread(get_klines, str(trade.get("symbol", "")), 180, include_current=True)
+            chart = await asyncio.to_thread(render_trade_chart, candles, trade, "OPEN" if trade.get("status") == "OPEN" else "SIGNAL")
+            created_raw = str(trade.get("created_at") or "")
+            try:
+                created = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).astimezone().strftime("%d.%m.%Y")
+            except (ValueError, TypeError):
+                created = "не указано"
+            caption = (
+                f"📈 График сделки: {trade.get('symbol')} {trade.get('direction')}\n"
+                f"Дата: {created}\n"
+                f"Статус: {'Открыта' if trade.get('status') == 'OPEN' else 'Ожидает входа'}\n"
+                f"Entry: {float(trade.get('entry') or 0):.8g} | TP: {float(trade.get('tp') or 0):.8g} | SL: {float(trade.get('sl') or 0):.8g}\n"
+                f"Стратегия: {trade.get('strategy', '?')}"
+            )
+            await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart, caption=caption[:1000])
+        except Exception:
+            logger.exception("Не удалось показать график сделки %s", trade_id)
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Не удалось загрузить график. Проверь подключение к интернету и попробуй ещё раз.")
+        return
+
+    if data.startswith("masb:reportview:"):
+        parts_report = data.split(":", maxsplit=3)
+        if len(parts_report) == 4:
+            report_type, selected = parts_report[2], parts_report[3]
+            strategy_name = None if selected == "all" else selected
+            if strategy_name is not None and strategy_name not in list_strategies():
+                await query.edit_message_text("Стратегия не найдена.", reply_markup=balance_menu_keyboard())
+                return
+            if report_type == "pnl":
+                active_trades_for_report = active_trades(strategy_name)
+                await _refresh_open_trade_prices(active_trades_for_report)
+                report_text = pnl_report_text(strategy_name)
+                active_text, report_keyboard = pnl_open_trades_text(strategy_name)
+                await query.edit_message_text((report_text + active_text)[:4000], reply_markup=report_keyboard)
+            else:
+                # Один формат для fibZZ5, fibZZ10 и «Все стратегии».
+                # Каждое сообщение содержит максимум 10 сделок; выводится вся история.
+                report_messages = history_report_messages(strategy_name, trades_per_message=10)
+                report_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"masb:reportview:{report_type}:{selected}")],
+                    [InlineKeyboardButton("⬅️ Выбрать стратегию", callback_data=f"masb:report:{report_type}")],
+                    [InlineKeyboardButton("⬅️ К балансу", callback_data="masb:balancehome")],
+                ])
+                await query.edit_message_text(report_messages[0], reply_markup=report_keyboard)
+                for message_text in report_messages[1:]:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=message_text,
+                    )
         return
 
     parts = data.split(":", maxsplit=2)

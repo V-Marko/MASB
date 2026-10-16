@@ -19,11 +19,10 @@ SETTINGS_FILE = DATA_DIR / "strategy_settings.json"
 
 DEFAULT_BALANCE = 100.0
 
-# Список стратегий для отображения в панели.
-# Добавляй сюда новые стратегии по мере подключения.
-STRATEGIES = {
-    "fibZZ10": "ZigZag + Fibonacci",
-}
+# Список стратегий берётся автоматически из папки strategy/.
+from strategy.registry import discover_strategies
+
+STRATEGIES = discover_strategies()[2]
 
 
 def load_json(path: Path, default=None):

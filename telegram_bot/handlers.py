@@ -347,14 +347,16 @@ async def show_section(
     )
 
     if section == BTN_STRATEGIES:
-        # Открываем интерактивную панель стратегий с inline-кнопками.
         from telegram_bot.strategy_handlers import show_strategies_menu
-
         await show_strategies_menu(update, context)
         return
 
-    text = get_section_text(section, context)
+    if section == BTN_BALANCE:
+        from telegram_bot.strategy_handlers import show_balance_menu
+        await show_balance_menu(chat.id, context)
+        return
 
+    text = get_section_text(section, context)
     await send_tracked_message(
         chat.id,
         text,
