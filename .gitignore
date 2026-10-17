@@ -1,4 +1,5 @@
 .env
+.my_note
 .venv/
 venv/
 __pycache__/
