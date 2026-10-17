@@ -17,6 +17,7 @@ from telegram_bot.keyboards import (
     BTN_STATUS,
     BTN_BALANCE,
     BTN_STRATEGIES,
+    BTN_SETTINGS,
     BTN_HELP,
     BTN_HOME,
     MAIN_MENU_BUTTONS,
@@ -27,7 +28,6 @@ logger = logging.getLogger("MASB.telegram.handlers")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-
 OWNER_FILE = DATA_DIR / "telegram_owner.json"
 MESSAGES_FILE = DATA_DIR / "telegram_messages.json"
 
@@ -35,7 +35,6 @@ MESSAGES_FILE = DATA_DIR / "telegram_messages.json"
 # ============================================================
 # JSON STORAGE
 # ============================================================
-
 def read_json(path: Path, default: Any) -> Any:
     try:
         if not path.exists():
@@ -63,7 +62,6 @@ def write_json(path: Path, data: Any) -> None:
 # ============================================================
 # OWNER
 # ============================================================
-
 def get_owner_id() -> int | None:
     data = read_json(OWNER_FILE, {})
 
@@ -97,7 +95,6 @@ def is_owner(update: Update) -> bool:
 # ============================================================
 # MESSAGE TRACKING
 # ============================================================
-
 def get_chat_messages(chat_id: int) -> list[int]:
     data = read_json(MESSAGES_FILE, {})
 
@@ -147,8 +144,6 @@ async def track_user_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
-
     message = update.effective_message
     chat = update.effective_chat
 
@@ -160,17 +155,14 @@ async def track_user_message(
 
 # ============================================================
 # CHAT CLEANUP
+# (живая панель не трекается, поэтому здесь не удаляется)
 # ============================================================
-
 async def clean_previous_messages(
     chat_id: int,
     keep_message_id: int,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
-
     old_message_ids = get_chat_messages(chat_id)
-
 
     save_chat_messages(chat_id, [keep_message_id])
 
@@ -191,7 +183,6 @@ async def clean_previous_messages(
                 chat_id,
                 error,
             )
-
 
 
 async def send_tracked_message(
@@ -218,12 +209,9 @@ async def send_tracked_message(
     return sent_message
 
 
-
 # ============================================================
 # MENU TEXT
 # ============================================================
-
-
 def get_strategies_text() -> str:
     try:
         from services.strategy_manager import list_strategies
@@ -270,7 +258,6 @@ def get_section_text(
     section: str,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> str:
-
     if section == BTN_STATUS:
         return context.application.bot_data.get(
             "masb_status_text",
@@ -301,6 +288,7 @@ def get_section_text(
             "📊 Состояние — состояние бота\n"
             "💰 Баланс — информация о балансе\n"
             "🧩 Стратегии — список стратегий\n"
+            "⚙️ Настройки — живая панель монет\n"
             "❔ Помощь — эта инструкция\n\n"
             "Выбирай раздел кнопками меню."
         )
@@ -311,13 +299,11 @@ def get_section_text(
 # ============================================================
 # SHOW SECTION
 # ============================================================
-
 async def show_section(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     section: str,
 ) -> None:
-
     message = update.effective_message
     chat = update.effective_chat
 
@@ -339,7 +325,6 @@ async def show_section(
         )
         return
 
-
     await clean_previous_messages(
         chat.id,
         message.message_id,
@@ -356,6 +341,11 @@ async def show_section(
         await show_balance_menu(chat.id, context)
         return
 
+    if section == BTN_SETTINGS:
+        from telegram_bot.panel_handlers import show_settings_menu
+        await show_settings_menu(chat.id, context)
+        return
+
     text = get_section_text(section, context)
     await send_tracked_message(
         chat.id,
@@ -368,12 +358,10 @@ async def show_section(
 # ============================================================
 # /START
 # ============================================================
-
 async def cmd_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
@@ -397,12 +385,10 @@ async def cmd_start(
 # ============================================================
 # BUTTON HANDLER
 # ============================================================
-
 async def menu_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     message = update.effective_message
 
     if message is None or not message.text:
@@ -423,12 +409,10 @@ async def menu_handler(
 # ============================================================
 # ERROR HANDLER
 # ============================================================
-
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     logger.error(
         "Ошибка Telegram-обработчика",
         exc_info=context.error,
@@ -438,7 +422,6 @@ async def error_handler(
 # ============================================================
 # REGISTER HANDLERS
 # ============================================================
-
 def register_handlers(application: Application) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 

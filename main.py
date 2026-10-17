@@ -1,4 +1,3 @@
-
 import logging
 import os
 import sys
@@ -10,21 +9,20 @@ from telegram.request import HTTPXRequest
 
 from telegram_bot.handlers import register_handlers
 from telegram_bot.strategy_handlers import register_strategy_handlers
+from telegram_bot.panel_handlers import register_panel_handlers
+
 # ============================================================
 # PATHS
 # ============================================================
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_FILE = PROJECT_ROOT / ".env"
 LOGS_DIR = PROJECT_ROOT / "logs"
-
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
 # ENVIRONMENT
 # ============================================================
-
 load_dotenv(ENV_FILE)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -40,7 +38,6 @@ if not TELEGRAM_BOT_TOKEN:
 # ============================================================
 # LOGGING
 # ============================================================
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -63,9 +60,7 @@ logger = logging.getLogger("MASB")
 # ============================================================
 # TELEGRAM CONNECTION
 # ============================================================
-
 def build_application() -> Application:
-
     main_request = HTTPXRequest(
         connection_pool_size=16,
         connect_timeout=20,
@@ -91,11 +86,10 @@ def build_application() -> Application:
     )
 
     register_handlers(application)
-
     register_strategy_handlers(application)
+    register_panel_handlers(application)
 
-    logger.info("Обработчики Telegram и менеджер стратегий зарегистрированы.")
-
+    logger.info("Обработчики Telegram, менеджер стратегий и живая панель зарегистрированы.")
 
     return application
 
@@ -103,9 +97,7 @@ def build_application() -> Application:
 # ============================================================
 # START
 # ============================================================
-
 def main() -> None:
-
     logger.info("Запуск MASB Telegram Bot...")
 
     application = build_application()

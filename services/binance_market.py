@@ -65,7 +65,8 @@ def get_klines(
         candles.append({
             "timestamp": int(row[0]),
             "time": int(row[0]),
-            "open": float(row[1]),
+            "open"
+            : float(row[1]),
             "high": float(row[2]),
             "low": float(row[3]),
             "close": float(row[4]),

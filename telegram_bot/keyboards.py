@@ -1,10 +1,10 @@
-
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 
 
 BTN_STATUS = "📊 Состояние"
 BTN_BALANCE = "💰 Баланс"
 BTN_STRATEGIES = "🧩 Стратегии"
+BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❔ Помощь"
 BTN_HOME = "⬅️ Главное меню"
 
@@ -12,6 +12,7 @@ MAIN_MENU_BUTTONS = {
     BTN_STATUS,
     BTN_BALANCE,
     BTN_STRATEGIES,
+    BTN_SETTINGS,
     BTN_HELP,
     BTN_HOME,
 }
@@ -26,6 +27,9 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(BTN_STRATEGIES),
+                KeyboardButton(BTN_SETTINGS),
+            ],
+            [
                 KeyboardButton(BTN_HELP),
             ],
         ],
@@ -33,5 +37,5 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=False,
         is_persistent=True,
         selective=False,
-        input_field_placeholder="Состояние • Баланс • Стратегии • Помощь",
+        input_field_placeholder="Состояние • Баланс • Стратегии • Настройки • Помощь",
     )
