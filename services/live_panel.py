@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any
 
@@ -17,6 +17,10 @@ logger = logging.getLogger("MASB.LivePanel")
 
 STATE_FILE = DATA_DIR / "live_panel.json"
 _LOCK = threading.RLock()
+
+# Армения: UTC+4, без перехода на летнее время.
+LOCAL_TZ = timezone(timedelta(hours=4))
+LOCAL_TZ_NAME = "AMT"
 
 CANDLES = 72  # 72 часовые свечи = 3 суток на графике каждой монеты
 
@@ -140,8 +144,8 @@ def render_coin(symbol: str, candles: list[dict[str, Any]]) -> tuple[bytes, str]
     ax.text(n - 0.3, price, f" {_fmt_price(price)}", color=line_color,
             va="center", ha="left", fontsize=9, fontweight="bold")
 
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    ax.set_title(f"{symbol} · 1h · {now} UTC", color=fg, fontsize=11,
+    now = datetime.now(LOCAL_TZ).strftime("%H:%M:%S")
+    ax.set_title(f"{symbol} · 1h · {now} {LOCAL_TZ_NAME}", color=fg, fontsize=11,
                  fontweight="bold", loc="left")
     ax.tick_params(axis="y", colors=fg, labelsize=8)
     ax.set_xticks([])
@@ -164,6 +168,6 @@ def render_coin(symbol: str, candles: list[dict[str, Any]]) -> tuple[bytes, str]
         f"📈 За 24ч: {change:+.2f}%\n"
         f"⬆️ Макс 24ч: {_fmt_price(high24)}\n"
         f"⬇️ Мин 24ч: {_fmt_price(low24)}\n"
-        f"🕒 {now} UTC"
+        f"🕒 {now} {LOCAL_TZ_NAME}"
     )
     return output.getvalue(), caption
