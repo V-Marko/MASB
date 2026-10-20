@@ -44,41 +44,55 @@ def calculate_sl(
 
 
 def calculate_position_size(
-    balance: float,
-    risk_percent: float,
-    entry: float,
-    sl: float,
-) -> dict[str, float]:
-
-    balance = float(balance)
-    risk_percent = float(risk_percent)
-    entry = float(entry)
-    sl = float(sl)
-
-    if balance <= 0:
-        raise ValueError("Баланс должен быть больше нуля.")
+    balance,
+    entry,
+    sl,
+    risk_percent=1.0,
+    leverage=10
+):
+    if balance <= 0 or entry <= 0:
+        return None
 
     if not 0 < risk_percent <= 100:
-        raise ValueError("Риск должен быть в диапазоне (0, 100].")
+        return None
 
-    if entry <= 0 or sl <= 0:
-        raise ValueError("Entry и SL должны быть больше нуля.")
+    if leverage <= 0:
+        return None
 
-    if entry == sl:
-        raise ValueError("Entry и SL не должны совпадать.")
+    # 1. Рассчитываем маржу
+    margin = balance * risk_percent / 100.0
 
-    risk_amount = balance * risk_percent / 100.0
-    price_distance_percent = abs(entry - sl) / entry
+    # 2. Рассчитываем номинальную стоимость позиции
+    position_value = margin * leverage
 
-    # Приблизительный номинал позиции:
-    # допустимый убыток / относительное расстояние до SL.
-    position_value = risk_amount / price_distance_percent
+    # 3. Рассчитываем количество монет
     quantity = position_value / entry
 
+    # 4. Рассчитываем расстояние до Stop Loss
+    sl_distance_percent = abs(entry - sl) / entry * 100
+
+    # 5. Оцениваем убыток при достижении SL
+    potential_loss = quantity * abs(entry - sl)
+
+    # 6. Рассчитываем Take Profit для RR 1:3
+    # Направление определяется по расположению SL
+    if sl < entry:
+        tp = entry + (entry - sl) * 3
+    elif sl > entry:
+        tp = entry - (sl - entry) * 3
+    else:
+        return None
+
     return {
-        "balance": balance,
-        "risk_percent": risk_percent,
-        "risk_amount": risk_amount,
+        "margin": margin,
+        "leverage": leverage,
         "position_value": position_value,
         "quantity": quantity,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "rr": 3.0,
+        "sl_distance_percent": sl_distance_percent,
+        "potential_loss": potential_loss,
+        "potential_profit": potential_loss * 3
     }
