@@ -9,10 +9,6 @@ from core.fibonacci import fibo_price, fibonacci_levels
 from core.risk_management import calculate_sl
 
 
-# ============================================================
-# STRATEGY 1: ZigZag 10% + Fibonacci
-# ============================================================
-
 NAME = "fibZZ10"
 ZIGZAG_DEVIATION = 10.0
 

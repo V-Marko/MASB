@@ -22,7 +22,6 @@ from telegram.ext import (
 
 from services.binance_market import get_klines
 from services.strategy_manager import (
-    add_strategy,
     get_last_candle,
     get_symbols,
     list_strategies,
@@ -30,6 +29,7 @@ from services.strategy_manager import (
     record_signal,
     set_last_candle,
     set_strategy_enabled,
+    sync_strategies,
 )
 
 from strategy.registry import discover_strategies
@@ -1190,11 +1190,9 @@ async def scan_enabled_strategies(
 def register_strategy_handlers(application: Application) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    existing = list_strategies()
+    # Оставляем только стратегии, найденные в папке strategy/.
+    sync_strategies(set(STRATEGIES))
 
-    for name in STRATEGIES:
-        if name not in existing:
-            add_strategy(name)
 
     application.add_handler(
         CommandHandler("strategies", cmd_strategies)

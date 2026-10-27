@@ -180,3 +180,38 @@ def add_strategy(name: str) -> None:
         }
 
         _write_state(state)
+
+
+
+def sync_strategies(registered_names: set[str]) -> None:
+    """Удаляет из состояния стратегии, которых больше нет в реестре."""
+    with _LOCK:
+        state = _read_state()
+        current = state.get("strategies", {})
+
+        if not isinstance(current, dict):
+            current = {}
+
+        synced: dict[str, dict[str, Any]] = {}
+
+        for name in sorted(registered_names):
+            item = current.get(name)
+
+            if not isinstance(item, dict):
+                item = {
+                    "enabled": False,
+                    "last_candle": {},
+                    "signals": 0,
+                    "last_error": None,
+                }
+            else:
+                item = dict(item)
+                item.setdefault("enabled", False)
+                item.setdefault("last_candle", {})
+                item.setdefault("signals", 0)
+                item.setdefault("last_error", None)
+
+            synced[name] = item
+
+        state["strategies"] = synced
+        _write_state(state)
