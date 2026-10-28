@@ -16,6 +16,7 @@ from telegram.ext import (
 from telegram_bot.keyboards import (
     BTN_STATUS,
     BTN_BALANCE,
+    BTN_ACTIVE_TRADES,
     BTN_STRATEGIES,
     BTN_SETTINGS,
     BTN_HELP,
@@ -287,6 +288,7 @@ def get_section_text(
             "❔ Помощь\n\n"
             "📊 Состояние — состояние бота\n"
             "💰 Баланс — информация о балансе\n"
+            "📈 Active trades — открытые сделки, PnL и графики\n"
             "🧩 Стратегии — список стратегий\n"
             "⚙️ Настройки — живая панель монет\n"
             "❔ Помощь — эта инструкция\n\n"
@@ -339,6 +341,11 @@ async def show_section(
     if section == BTN_BALANCE:
         from telegram_bot.strategy_handlers import show_balance_menu
         await show_balance_menu(chat.id, context)
+        return
+
+    if section == BTN_ACTIVE_TRADES:
+        from telegram_bot.strategy_handlers import show_active_trades_menu
+        await show_active_trades_menu(chat.id, context)
         return
 
     if section == BTN_SETTINGS:
