@@ -766,7 +766,7 @@ async def strategy_callback(
             return
         try:
             candles = await asyncio.to_thread(get_klines, str(trade.get("symbol", "")), 180, include_current=True)
-            chart = await asyncio.to_thread(render_trade_chart, candles, trade, "OPEN" if trade.get("status") == "OPEN" else "SIGNAL")
+            chart = await asyncio.to_thread(render_trade_chart, candles, trade, "ENTRY" if trade.get("status") == "OPEN" else "SIGNAL")
             created_raw = str(trade.get("created_at") or "")
             try:
                 created = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).astimezone().strftime("%d.%m.%Y")
