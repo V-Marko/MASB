@@ -442,7 +442,7 @@ async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TY
     if not trades:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="📈 ACTIVE TRADES — MASB\\n\\nNo active or pending trades right now.",
+            text="📈 ACTIVE TRADES — MASB\n\nNo active or pending trades right now.",
         )
         return
 
@@ -474,12 +474,12 @@ async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TY
             chart_phase = "ENTRY"
 
         caption = (
-            f"📈 {symbol} · {direction}\\n"
-            f"Status: {status_text}\\n"
-            f"Entry: {entry:.8g}\\n"
-            f"Take Profit: {tp:.8g}\\n"
-            f"Stop Loss: {sl:.8g}\\n"
-            f"PnL: {pnl_text}\\n"
+            f"📈 {symbol} · {direction}\n"
+            f"Status: {status_text}\n"
+            f"Entry: {entry:.8g}\n"
+            f"Take Profit: {tp:.8g}\n"
+            f"Stop Loss: {sl:.8g}\n"
+            f"PnL: {pnl_text}\n"
             f"Strategy: {trade.get('strategy', '?')}"
         )
 
@@ -505,7 +505,7 @@ async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TY
             logger.exception("Could not send active trade chart for %s", trade.get("id"))
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=caption + "\\n\\n⚠️ Chart unavailable right now.",
+                text=caption + "\n\n⚠️ Chart unavailable right now.",
             )
 
 
