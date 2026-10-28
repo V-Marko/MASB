@@ -436,6 +436,31 @@ def report_strategy_keyboard(report_type: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all active/pending virtual trades, live PnL, levels, and chart buttons."""
+    from telegram_bot.handlers import send_tracked_message
+
+    trades = active_trades()
+    await _refresh_open_trade_prices(trades)
+    active_text, markup = pnl_open_trades_text(None)
+    header = "📈 ACTIVE TRADES — MASB\n\nEntry, TP, SL, floating PnL and strategy chart for each trade.\n"
+    await send_tracked_message(
+        chat_id,
+        (header + active_text.strip())[:3900],
+        context,
+        with_keyboard=False,
+        reply_markup=markup,
+    )
+    from telegram_bot.keyboards import main_keyboard
+    await send_tracked_message(
+        chat_id,
+        "📌 Main menu is available below.",
+        context,
+        with_keyboard=False,
+        reply_markup=main_keyboard(),
+    )
+
+
 async def show_balance_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     from telegram_bot.handlers import send_tracked_message
     await send_tracked_message(
@@ -580,7 +605,8 @@ def pnl_open_trades_text(strategy_name: str | None) -> tuple[str, InlineKeyboard
             lines.append(
                 f"📅 Дата — {date_text}\n"
                 f"🪙 Монета — {trade.get('symbol', '?')} ({trade.get('direction', '?')})\n"
-                f"🎯 TP — {float(trade.get('tp') or 0):.8g}\n"
+                f"🎯 Entry — {float(trade.get('actual_entry') or trade.get('entry') or 0):.8g}\n"
+                f"🎯 Take profit — {float(trade.get('tp') or 0):.8g}\n"
                 f"🛑 SL — {float(trade.get('sl') or 0):.8g}\n"
                 f"📊 PnL — {pnl_text}\n"
                 f"Статус — {'Открыта' if status == 'OPEN' else 'Ожидает входа'}\n"
