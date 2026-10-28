@@ -1,18 +1,19 @@
-
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1001,6 +1002,117 @@ async def _event_chart_candles(
         return fallback
 
 
+# Telegram разрешает примерно 1 сообщение в секунду в один чат. В начале часа сканер
+# может отправить сразу много сигналов, а монитор — TP/SL, поэтому все отправки
+# графиков идут через общую очередь с паузой между сообщениями.
+_TG_SEND_LOCK: asyncio.Lock | None = None
+_TG_MIN_INTERVAL = 1.2
+_TG_LAST_SEND = 0.0
+_TG_BLOCKED_UNTIL = 0.0
+_TG_ATTEMPTS = 4
+_TG_TIMEOUTS = {
+    "read_timeout": 60,
+    "write_timeout": 60,
+    "connect_timeout": 20,
+    "pool_timeout": 20,
+}
+
+
+def _tg_lock() -> asyncio.Lock:
+    # Создаём лок лениво, уже внутри работающего event loop.
+    global _TG_SEND_LOCK
+    if _TG_SEND_LOCK is None:
+        _TG_SEND_LOCK = asyncio.Lock()
+    return _TG_SEND_LOCK
+
+
+def _retry_after_seconds(exc: RetryAfter) -> float:
+    value = exc.retry_after
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 5.0
+
+
+async def _deferred_tg_send(what: str, factory: Callable[[], Awaitable[Any]], delay: float) -> None:
+    """Retry a rate-limited notification in the background, without blocking a scanner job."""
+    await asyncio.sleep(delay)
+    try:
+        await _tg_send(what, factory)
+    except Exception:
+        logger.exception("Отложенная отправка Telegram не удалась (%s)", what)
+
+
+async def _tg_send(
+    what: str,
+    factory: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Send serially; defer long Telegram RetryAfter delays so jobs can finish.
+
+    RetryAfter >= 60s is rescheduled in the background instead of holding a
+    strategy/panel job open for many minutes. Short waits and network errors
+    are retried normally. BadRequest is propagated to the caller.
+    """
+    global _TG_LAST_SEND, _TG_BLOCKED_UNTIL
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _TG_ATTEMPTS + 1):
+        retry_delay: float | None = None
+        async with _tg_lock():
+            blocked = _TG_BLOCKED_UNTIL - time.monotonic()
+            if blocked > 0:
+                logger.warning(
+                    "Telegram пока на паузе; отправка %s отложена на %.0f c",
+                    what, blocked,
+                )
+                asyncio.create_task(_deferred_tg_send(what, factory, blocked))
+                return None
+            wait = _TG_MIN_INTERVAL - (time.monotonic() - _TG_LAST_SEND)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                result = await factory()
+                _TG_LAST_SEND = time.monotonic()
+                return result
+            except RetryAfter as exc:
+                last_exc = exc
+                delay = _retry_after_seconds(exc) + 1.0
+                _TG_LAST_SEND = time.monotonic()
+                if delay >= 60:
+                    _TG_BLOCKED_UNTIL = max(_TG_BLOCKED_UNTIL, time.monotonic() + delay)
+                    logger.warning(
+                        "Telegram flood control (%s): отложена повторная отправка через %.0f c",
+                        what, delay,
+                    )
+                    asyncio.create_task(_deferred_tg_send(what, factory, delay))
+                    return None
+                logger.warning(
+                    "Telegram flood control (%s), попытка %d/%d, жду %.0f c",
+                    what, attempt, _TG_ATTEMPTS, delay,
+                )
+                retry_delay = delay
+            except BadRequest:
+                raise
+            except NetworkError as exc:  # включает TimedOut
+                last_exc = exc
+                _TG_LAST_SEND = time.monotonic()
+                logger.warning(
+                    "Сетевая ошибка Telegram (%s): %s: %s, попытка %d/%d",
+                    what, type(exc).__name__, exc, attempt, _TG_ATTEMPTS,
+                )
+        # Do not hold the global Telegram-send lock while waiting for a retry.
+        if retry_delay is not None:
+            await asyncio.sleep(retry_delay)
+        elif attempt < _TG_ATTEMPTS:
+            await asyncio.sleep(2.0 * attempt)
+
+    assert last_exc is not None
+    raise last_exc
+
+
+
 async def _send_trade_chart(
     application: Application,
     trade: dict[str, Any],
@@ -1011,19 +1123,60 @@ async def _send_trade_chart(
     owner = _owner_id()
     if owner is None or not notifications_enabled(str(trade.get("strategy", "fibZZ10"))):
         return
+
+    label = f"{trade.get('symbol')} / {phase}"
+    bot = application.bot
+
+    # 1) Строим картинку. Ошибка здесь = проблема данных/matplotlib, а не Telegram.
+    png: bytes | None = None
+    filename = f"{trade.get('symbol', 'MASB')}_{str(phase).lower()}.png"
     try:
         chart = await asyncio.to_thread(render_trade_chart, candles, trade, phase)
-        await application.bot.send_photo(
-            chat_id=owner,
-            photo=chart,
-            caption=caption[:1000],
+        png = chart.getvalue()
+    except Exception:
+        logger.exception("Не удалось построить график %s", label)
+
+    # 2) Отправляем фото, при отказе Telegram — как документ, при отказе — текстом.
+    if png:
+        try:
+            await _tg_send(
+                f"photo {label}",
+                lambda: bot.send_photo(
+                    chat_id=owner,
+                    photo=png,
+                    caption=caption[:1000],
+                    **_TG_TIMEOUTS,
+                ),
+            )
+            return
+        except BadRequest as exc:
+            # Например Photo_invalid_dimensions / Image_process_failed.
+            logger.warning("Telegram отклонил фото %s (%s), отправляю как файл", label, exc)
+            try:
+                await _tg_send(
+                    f"document {label}",
+                    lambda: bot.send_document(
+                        chat_id=owner,
+                        document=png,
+                        filename=filename,
+                        caption=caption[:1000],
+                        **_TG_TIMEOUTS,
+                    ),
+                )
+                return
+            except (TelegramError, OSError):
+                logger.exception("Не удалось отправить график как файл %s", label)
+        except (TelegramError, OSError):
+            logger.exception("Не удалось отправить график %s", label)
+
+    # 3) Резерв: хотя бы текст сделки, чтобы сигнал не потерялся.
+    try:
+        await _tg_send(
+            f"text {label}",
+            lambda: bot.send_message(chat_id=owner, text=caption[:3500], **_TG_TIMEOUTS),
         )
     except Exception:
-        logger.exception("Не удалось отправить график %s / %s", trade.get("symbol"), phase)
-        try:
-            await application.bot.send_message(chat_id=owner, text=caption[:3500])
-        except Exception:
-            logger.exception("Не удалось отправить резервное сообщение о сделке")
+        logger.exception("Не удалось отправить резервное сообщение о сделке %s", label)
 
 
 async def _scan_strategy(
@@ -1222,14 +1375,16 @@ def register_strategy_handlers(application: Application) -> None:
 
     application.job_queue.run_repeating(
         scan_enabled_strategies,
-        interval=60,
+        interval=180,
         first=10,
+        job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 30},
         name="masb_strategy_scanner",
     )
     application.job_queue.run_repeating(
         monitor_active_trades,
         interval=60,
         first=15,
+        job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 30},
         name="masb_trade_monitor",
     )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 from datetime import datetime, timezone
 from io import BytesIO
@@ -11,15 +12,18 @@ from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+# Используем объектный API matplotlib (Figure + FigureCanvasAgg) вместо pyplot:
+# pyplot хранит глобальное состояние и НЕ потокобезопасен, а графики строятся
+# из asyncio.to_thread() сразу несколькими задачами (сканер + монитор).
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 from config import DATA_DIR
 
 logger = logging.getLogger("MASB.TradeMonitor")
 STATE_FILE = DATA_DIR / "trade_monitor.json"
 _LOCK = threading.RLock()
+_RENDER_LOCK = threading.Lock()  # один график за раз
 MAX_HISTORY = 2000
 
 
@@ -176,7 +180,26 @@ def _candle_datetime(candle: dict[str, Any]) -> datetime:
         return datetime.now(timezone.utc)
 
 
+def _finite(value: Any, default: float | None = None) -> float | None:
+    """float(value), если это конечное число, иначе default (None/NaN/inf/мусор)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def render_trade_chart(
+    candles: list[dict[str, Any]],
+    trade: dict[str, Any],
+    phase: str = "SIGNAL",
+) -> BytesIO:
+    # matplotlib нельзя безопасно использовать из нескольких потоков одновременно.
+    with _RENDER_LOCK:
+        return _render_trade_chart_locked(candles, trade, phase)
+
+
+def _render_trade_chart_locked(
     candles: list[dict[str, Any]],
     trade: dict[str, Any],
     phase: str = "SIGNAL",
@@ -184,6 +207,14 @@ def render_trade_chart(
 
     if not candles:
         raise ValueError("Для графика нет свечей")
+
+    # Выбрасываем свечи с нечисловыми/нулевыми ценами, чтобы они не ломали оси.
+    candles = [
+        c for c in candles
+        if all(_finite(c.get(k)) is not None for k in ("open", "high", "low", "close"))
+    ]
+    if not candles:
+        raise ValueError("Для графика нет корректных свечей")
 
     visible = candles[-160:]
     dates = [_candle_datetime(c) for c in visible]
@@ -202,7 +233,9 @@ def render_trade_chart(
     fib_color = "#b2b5be"
     green_fib_color = "#00e676"
 
-    fig, ax = plt.subplots(figsize=(12, 7), dpi=120)
+    fig = Figure(figsize=(12, 7), dpi=120)
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
 
@@ -251,8 +284,8 @@ def render_trade_chart(
 
     start_x = nearest_x(trade.get("swing_start_timestamp"), trade.get("swing_start_index"))
     end_x = nearest_x(trade.get("swing_end_timestamp"), trade.get("swing_end_index"))
-    swing_start = float(trade.get("swing_start") or 0.0)
-    swing_end = float(trade.get("swing_end") or 0.0)
+    swing_start = _finite(trade.get("swing_start"), 0.0) or 0.0
+    swing_end = _finite(trade.get("swing_end"), 0.0) or 0.0
     if start_x is not None and end_x is not None and swing_start > 0 and swing_end > 0:
         ax.plot([start_x, end_x], [swing_start, swing_end], color=entry_color,
                 linewidth=2.1, zorder=5, label="ZigZag")
@@ -266,11 +299,8 @@ def render_trade_chart(
     levels: dict[float, dict[str, Any]] = {}
 
     def add_level(price: Any, label: str, color: str, style: str, width: float, priority: int) -> None:
-        try:
-            value = float(price)
-        except (TypeError, ValueError):
-            return
-        if value <= 0:
+        value = _finite(price)
+        if value is None or value <= 0:
             return
         key = round(value, 10)
         current = levels.setdefault(key, {"price": value, "labels": [], "color": color,
@@ -280,22 +310,25 @@ def render_trade_chart(
         if priority >= current["priority"]:
             current.update(color=color, style=style, width=width, priority=priority)
 
-    for level, price in (trade.get("fibonacci") or {}).items():
+    fib_levels = trade.get("fibonacci")
+    green_levels = trade.get("green_fibonacci")
+    for level, price in (fib_levels.items() if isinstance(fib_levels, dict) else ()):
         add_level(price, f"Fib {level}", fib_color, "-", 0.75, 0)
-    for level, price in (trade.get("green_fibonacci") or {}).items():
+    for level, price in (green_levels.items() if isinstance(green_levels, dict) else ()):
         add_level(price, f"Green Fib {level}", green_fib_color, "--", 0.9, 1)
 
-    entry = float(trade["entry"])
-    tp = float(trade["tp"])
-    sl = float(trade["sl"])
+    entry = _finite(trade.get("entry"))
+    tp = _finite(trade.get("tp"))
+    sl = _finite(trade.get("sl"))
+    if entry is None or tp is None or sl is None:
+        raise ValueError(f"Некорректные Entry/TP/SL в сделке: {trade.get('entry')}/{trade.get('tp')}/{trade.get('sl')}")
     add_level(entry, f"ENTRY {trade.get('entry_number', 1)}", entry_color, "-", 2.2, 4)
     add_level(tp, "TP", tp_color, ":", 1.9, 3)
     add_level(sl, "SL", sl_color, ":", 1.9, 3)
 
     closed = phase in {"TP", "SL"} or trade.get("status") in {"TP", "SL"}
-    exit_price = trade.get("exit_price")
+    exit_price = _finite(trade.get("exit_price"))
     if closed and exit_price is not None:
-        exit_price = float(exit_price)
         add_level(exit_price, "EXIT", tp_color if phase == "TP" else sl_color, "--", 1.8, 5)
 
     for level in levels.values():
@@ -367,14 +400,15 @@ def render_trade_chart(
     pad = (high_y - low_y) * 0.07 or max(abs(high_y), 1.0) * 0.002
     ax.set_ylim(low_y - pad, high_y + pad)
     ax.set_xlim(-1, right + max(12, n // 5))
-    legend = ax.legend(loc="upper left", fontsize=8, facecolor="#1f2937", edgecolor=grid)
-    for legend_text in legend.get_texts():
-        legend_text.set_color("white")
+    handles, _labels = ax.get_legend_handles_labels()
+    if handles:
+        legend = ax.legend(loc="upper left", fontsize=8, facecolor="#1f2937", edgecolor=grid)
+        for legend_text in legend.get_texts():
+            legend_text.set_color("white")
     fig.tight_layout()
 
     output = BytesIO()
     fig.savefig(output, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
-    plt.close(fig)
     output.seek(0)
     output.name = f"{trade.get('symbol', 'MASB')}_{phase.lower()}.png"
     return output

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest, RetryAfter, TelegramError
@@ -23,9 +24,10 @@ from telegram_bot.handlers import get_owner_id, send_tracked_message
 
 logger = logging.getLogger("MASB.telegram.panel")
 
-UPDATE_INTERVAL = 60   # секунд между полными обновлениями
+UPDATE_INTERVAL = 300  # секунд между полными обновлениями; панель обновляет много монет
 SEND_DELAY = 1.1       # пауза между сообщениями, чтобы не упереться в лимиты Telegram
 _REFRESH_LOCK = asyncio.Lock()
+_PANEL_RATE_LIMIT_UNTIL = 0.0
 
 
 # ============================================================
@@ -68,6 +70,7 @@ async def _push_coin(
     caption: str,
 ) -> None:
     """Обновить сообщение монеты на месте; если его нет — отправить новое."""
+    global _PANEL_RATE_LIMIT_UNTIL
     for attempt in range(2):
         message_id = get_panel_messages().get(symbol)
         try:
@@ -90,7 +93,16 @@ async def _push_coin(
             return
 
         except RetryAfter as error:
-            await asyncio.sleep(float(error.retry_after) + 1.0)
+            delay = float(error.retry_after) + 1.0
+            if delay >= 60:
+                # Pause the whole panel, not just this symbol, until Telegram allows sends again.
+                _PANEL_RATE_LIMIT_UNTIL = max(_PANEL_RATE_LIMIT_UNTIL, time.monotonic() + delay)
+                logger.warning(
+                    "Telegram flood control для панели %s: пауза панели на %.0f c",
+                    symbol, delay,
+                )
+                return
+            await asyncio.sleep(delay)
         except TelegramError as error:
             logger.warning("Ошибка Telegram для %s: %s", symbol, error)
             return
@@ -110,6 +122,9 @@ async def refresh_panel(application: Application, chat_id: int) -> None:
                 drop_panel_message(symbol)
 
         for symbol in symbols:
+            if time.monotonic() < _PANEL_RATE_LIMIT_UNTIL:
+                logger.info("Обновление панели приостановлено из-за Telegram flood control")
+                return
             if not panel_enabled():
                 return  # выключили посреди обновления
             try:
