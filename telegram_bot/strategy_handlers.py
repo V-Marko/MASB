@@ -437,28 +437,76 @@ def report_strategy_keyboard(report_type: str) -> InlineKeyboardMarkup:
 
 
 async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show all active/pending virtual trades, live PnL, levels, and chart buttons."""
-    from telegram_bot.handlers import send_tracked_message
+    """Send one photo message per active trade, with its chart and full trade details."""
+    trades = list(reversed(active_trades()[-30:]))
+    if not trades:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📈 ACTIVE TRADES — MASB\\n\\nNo active or pending trades right now.",
+        )
+        return
 
-    trades = active_trades()
     await _refresh_open_trade_prices(trades)
-    active_text, markup = pnl_open_trades_text(None)
-    header = "📈 ACTIVE TRADES — MASB\n\nEntry, TP, SL, floating PnL and strategy chart for each trade.\n"
-    await send_tracked_message(
-        chat_id,
-        (header + active_text.strip())[:3900],
-        context,
-        with_keyboard=False,
-        reply_markup=markup,
-    )
-    from telegram_bot.keyboards import main_keyboard
-    await send_tracked_message(
-        chat_id,
-        "📌 Main menu is available below.",
-        context,
-        with_keyboard=False,
-        reply_markup=main_keyboard(),
-    )
+
+    for trade in trades:
+        symbol = str(trade.get("symbol", "?")).upper()
+        direction = str(trade.get("direction", "?")).upper()
+        status = str(trade.get("status", "PENDING")).upper()
+        entry = float(trade.get("actual_entry") or trade.get("entry") or 0.0)
+        tp = float(trade.get("tp") or 0.0)
+        sl = float(trade.get("sl") or 0.0)
+
+        if status == "PENDING":
+            pnl_text = "Waiting for entry"
+            status_text = "⏳ Pending entry"
+            chart_phase = "SIGNAL"
+        else:
+            current_price = trade.get("current_price")
+            if current_price is None:
+                pnl_text = "Current price unavailable"
+            else:
+                quantity = float(trade.get("quantity") or 0.0)
+                sign = 1.0 if direction == "LONG" else -1.0
+                gross = (float(current_price) - entry) * quantity * sign
+                estimated_fees = (entry * quantity + float(current_price) * quantity) * 0.00055
+                pnl_text = f"{gross - estimated_fees:+.4f} USDT (floating)"
+            status_text = "🟢 Open"
+            chart_phase = "ENTRY"
+
+        caption = (
+            f"📈 {symbol} · {direction}\\n"
+            f"Status: {status_text}\\n"
+            f"Entry: {entry:.8g}\\n"
+            f"Take Profit: {tp:.8g}\\n"
+            f"Stop Loss: {sl:.8g}\\n"
+            f"PnL: {pnl_text}\\n"
+            f"Strategy: {trade.get('strategy', '?')}"
+        )
+
+        try:
+            candles = await asyncio.to_thread(
+                get_klines, symbol, 180, include_current=True
+            )
+            chart = await asyncio.to_thread(
+                render_trade_chart, candles, trade, chart_phase
+            )
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart,
+                caption=caption[:1000],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔄 Refresh this trade",
+                        callback_data=f"masb:reportchart:{trade.get('id', '')}",
+                    )
+                ]]),
+            )
+        except Exception:
+            logger.exception("Could not send active trade chart for %s", trade.get("id"))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=caption + "\\n\\n⚠️ Chart unavailable right now.",
+            )
 
 
 async def show_balance_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
