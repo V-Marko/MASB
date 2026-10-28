@@ -414,9 +414,16 @@ def _render_trade_chart_locked(
     return output
 
 def entry_hit(trade: dict[str, Any], candle: dict[str, Any]) -> bool:
+    """Return True only when the candle's traded range actually contains Entry.
+
+    Checking only LOW for LONG or HIGH for SHORT incorrectly fills a limit order
+    when the entire candle is already beyond the requested entry price.
+    """
     low, high = float(candle["low"]), float(candle["high"])
     entry = float(trade["entry"])
-    return low <= entry if trade["direction"] == "LONG" else high >= entry
+    if low > high:
+        return False
+    return low <= entry <= high
 
 
 def touched_exit(trade: dict[str, Any], candle: dict[str, Any]) -> str | None:

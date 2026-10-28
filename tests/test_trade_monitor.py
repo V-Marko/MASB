@@ -16,9 +16,21 @@ class TradeMonitorTests(unittest.TestCase):
             "quantity": 0.5,
         }
 
-    def test_long_entry_detected_by_low(self):
+    def test_entry_requires_price_range_to_contain_limit(self):
+        # Entry is 100: only a candle whose traded range includes 100 can fill.
         self.assertTrue(entry_hit(self.trade, {"low": 99.0, "high": 103.0}))
+        self.assertTrue(entry_hit(self.trade, {"low": 100.0, "high": 103.0}))
+        self.assertTrue(entry_hit(self.trade, {"low": 99.0, "high": 100.0}))
         self.assertFalse(entry_hit(self.trade, {"low": 101.0, "high": 103.0}))
+        # Regression: entirely below/above the entry is not a touch.
+        self.assertFalse(entry_hit(self.trade, {"low": 95.0, "high": 99.0}))
+        self.assertFalse(entry_hit(self.trade, {"low": 101.0, "high": 105.0}))
+
+    def test_short_entry_also_requires_range_to_contain_limit(self):
+        trade = {**self.trade, "direction": "SHORT", "entry": 100.0, "tp": 90.0, "sl": 105.0}
+        self.assertTrue(entry_hit(trade, {"low": 98.0, "high": 101.0}))
+        self.assertFalse(entry_hit(trade, {"low": 95.0, "high": 99.0}))
+        self.assertFalse(entry_hit(trade, {"low": 101.0, "high": 106.0}))
 
     def test_same_candle_tp_and_sl_is_sl_first(self):
         candle = {"low": 94.0, "high": 111.0}

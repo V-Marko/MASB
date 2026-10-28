@@ -436,6 +436,79 @@ def report_strategy_keyboard(report_type: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send one photo message per active trade, with its chart and full trade details."""
+    trades = list(reversed(active_trades()[-30:]))
+    if not trades:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📈 ACTIVE TRADES — MASB\n\nNo active or pending trades right now.",
+        )
+        return
+
+    await _refresh_open_trade_prices(trades)
+
+    for trade in trades:
+        symbol = str(trade.get("symbol", "?")).upper()
+        direction = str(trade.get("direction", "?")).upper()
+        status = str(trade.get("status", "PENDING")).upper()
+        entry = float(trade.get("actual_entry") or trade.get("entry") or 0.0)
+        tp = float(trade.get("tp") or 0.0)
+        sl = float(trade.get("sl") or 0.0)
+
+        if status == "PENDING":
+            pnl_text = "Waiting for entry"
+            status_text = "⏳ Pending entry"
+            chart_phase = "SIGNAL"
+        else:
+            current_price = trade.get("current_price")
+            if current_price is None:
+                pnl_text = "Current price unavailable"
+            else:
+                quantity = float(trade.get("quantity") or 0.0)
+                sign = 1.0 if direction == "LONG" else -1.0
+                gross = (float(current_price) - entry) * quantity * sign
+                estimated_fees = (entry * quantity + float(current_price) * quantity) * 0.00055
+                pnl_text = f"{gross - estimated_fees:+.4f} USDT (floating)"
+            status_text = "🟢 Open"
+            chart_phase = "ENTRY"
+
+        caption = (
+            f"📈 {symbol} · {direction}\n"
+            f"Status: {status_text}\n"
+            f"Entry: {entry:.8g}\n"
+            f"Take Profit: {tp:.8g}\n"
+            f"Stop Loss: {sl:.8g}\n"
+            f"PnL: {pnl_text}\n"
+            f"Strategy: {trade.get('strategy', '?')}"
+        )
+
+        try:
+            candles = await asyncio.to_thread(
+                get_klines, symbol, 180, include_current=True
+            )
+            chart = await asyncio.to_thread(
+                render_trade_chart, candles, trade, chart_phase
+            )
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart,
+                caption=caption[:1000],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔄 Refresh this trade",
+                        callback_data=f"masb:reportchart:{trade.get('id', '')}",
+                    )
+                ]]),
+            )
+        except Exception:
+            logger.exception("Could not send active trade chart for %s", trade.get("id"))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=caption + "\n\n⚠️ Chart unavailable right now.",
+            )
+
+
 async def show_balance_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     from telegram_bot.handlers import send_tracked_message
     await send_tracked_message(
@@ -580,7 +653,8 @@ def pnl_open_trades_text(strategy_name: str | None) -> tuple[str, InlineKeyboard
             lines.append(
                 f"📅 Дата — {date_text}\n"
                 f"🪙 Монета — {trade.get('symbol', '?')} ({trade.get('direction', '?')})\n"
-                f"🎯 TP — {float(trade.get('tp') or 0):.8g}\n"
+                f"🎯 Entry — {float(trade.get('actual_entry') or trade.get('entry') or 0):.8g}\n"
+                f"🎯 Take profit — {float(trade.get('tp') or 0):.8g}\n"
                 f"🛑 SL — {float(trade.get('sl') or 0):.8g}\n"
                 f"📊 PnL — {pnl_text}\n"
                 f"Статус — {'Открыта' if status == 'OPEN' else 'Ожидает входа'}\n"
@@ -740,7 +814,7 @@ async def strategy_callback(
             return
         try:
             candles = await asyncio.to_thread(get_klines, str(trade.get("symbol", "")), 180, include_current=True)
-            chart = await asyncio.to_thread(render_trade_chart, candles, trade, "OPEN" if trade.get("status") == "OPEN" else "SIGNAL")
+            chart = await asyncio.to_thread(render_trade_chart, candles, trade, "ENTRY" if trade.get("status") == "OPEN" else "SIGNAL")
             created_raw = str(trade.get("created_at") or "")
             try:
                 created = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).astimezone().strftime("%d.%m.%Y")
@@ -1267,25 +1341,36 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         for candle in relevant:
             candle_ts = int(candle.get("timestamp", 0))
+            filled_this_candle = False
             if trade["status"] == "PENDING" and entry_hit(trade, candle):
                 trade = update_trade(trade["id"], {
                     "status": "OPEN",
                     "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "entry_candle_timestamp": candle_ts,
                     "last_checked_candle": candle_ts,
                     "actual_entry": float(trade["entry"]),
                 }) or trade
+                filled_this_candle = True
                 caption = (
                     f"🟠 ВХОД СОСТОЯЛСЯ | {trade['symbol']}\n"
                     f"Стратегия: {trade['strategy']} | {trade['direction']}\n"
                     f"Entry: {trade['entry']:.8g}\n🟢 TP: {trade['tp']:.8g}\n🔴 SL: {trade['sl']:.8g}\n"
-                    "Виртуальная позиция открыта."
+                    "Виртуальная позиция открыта: цена коснулась Entry."
                 )
                 chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
                 await _send_trade_chart(application, trade, chart_candles, "ENTRY", caption)
             elif trade["status"] == "PENDING":
                 trade = update_trade(trade["id"], {"last_checked_candle": candle_ts}) or trade
 
-            if trade["status"] == "OPEN":
+            # OHLC candles do not reveal whether TP/SL happened before or after
+            # Entry inside the same candle. Skip exits on the fill candle and
+            # start checking from the next candle to avoid retroactive fills.
+            entry_candle_ts = trade.get("entry_candle_timestamp")
+            is_entry_candle = (
+                entry_candle_ts is not None
+                and int(entry_candle_ts) == candle_ts
+            )
+            if trade["status"] == "OPEN" and not filled_this_candle and not is_entry_candle:
                 outcome = touched_exit(trade, candle)
                 if outcome:
                     exit_price = float(trade["sl"] if outcome == "SL" else trade["tp"])
