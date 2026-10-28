@@ -1267,25 +1267,36 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         for candle in relevant:
             candle_ts = int(candle.get("timestamp", 0))
+            filled_this_candle = False
             if trade["status"] == "PENDING" and entry_hit(trade, candle):
                 trade = update_trade(trade["id"], {
                     "status": "OPEN",
                     "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "entry_candle_timestamp": candle_ts,
                     "last_checked_candle": candle_ts,
                     "actual_entry": float(trade["entry"]),
                 }) or trade
+                filled_this_candle = True
                 caption = (
                     f"🟠 ВХОД СОСТОЯЛСЯ | {trade['symbol']}\n"
                     f"Стратегия: {trade['strategy']} | {trade['direction']}\n"
                     f"Entry: {trade['entry']:.8g}\n🟢 TP: {trade['tp']:.8g}\n🔴 SL: {trade['sl']:.8g}\n"
-                    "Виртуальная позиция открыта."
+                    "Виртуальная позиция открыта: цена коснулась Entry."
                 )
                 chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
                 await _send_trade_chart(application, trade, chart_candles, "ENTRY", caption)
             elif trade["status"] == "PENDING":
                 trade = update_trade(trade["id"], {"last_checked_candle": candle_ts}) or trade
 
-            if trade["status"] == "OPEN":
+            # OHLC candles do not reveal whether TP/SL happened before or after
+            # Entry inside the same candle. Skip exits on the fill candle and
+            # start checking from the next candle to avoid retroactive fills.
+            entry_candle_ts = trade.get("entry_candle_timestamp")
+            is_entry_candle = (
+                entry_candle_ts is not None
+                and int(entry_candle_ts) == candle_ts
+            )
+            if trade["status"] == "OPEN" and not filled_this_candle and not is_entry_candle:
                 outcome = touched_exit(trade, candle)
                 if outcome:
                     exit_price = float(trade["sl"] if outcome == "SL" else trade["tp"])
