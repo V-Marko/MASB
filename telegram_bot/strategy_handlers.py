@@ -337,7 +337,7 @@ def strategy_details_text(name: str) -> str:
     if error:
         lines.extend(["", f"⚠️ Последняя ошибка: {error_text}"])
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def strategy_balance_text(name: str) -> str:
