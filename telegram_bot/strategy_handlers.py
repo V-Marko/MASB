@@ -301,33 +301,43 @@ def strategy_details_text(name: str) -> str:
     status = "🟢 ВКЛЮЧЕНА" if enabled else "⚪ ВЫКЛЮЧЕНА"
     notify = notifications_enabled(name)
     notify_status = "ВКЛЮЧЕНЫ" if notify else "ВЫКЛЮЧЕНЫ"
+    stats = trade_stats(name)
+
+    error = info.get("last_error")
+    error_text = str(error)[:300] if error else "нет"
 
     lines = [
         f"📌 Стратегия: {name}",
         "",
         f"Статус: {status}",
-        f"Сигналов обнаружено: {info.get('signals', 0)}",
         f"Уведомления: {notify_status}",
+        f"Сигналов обнаружено: {info.get('signals', 0)}",
+        "",
+        "📊 РЕЗУЛЬТАТЫ СТРАТЕГИИ",
+        f"🎯 Win rate: {stats['win_rate']:.1f}%",
+        f"✅ Take Profit: {stats['wins']}",
+        f"❌ Stop Loss: {stats['losses']}",
+        f"📚 Всего закрытых сделок: {stats['closed']}",
+        f"⏳ Ожидают Entry: {stats['pending']}",
+        f"🟠 Открытые сделки: {stats['open']}",
+        f"💵 PnL после комиссий: {stats['pnl_net']:+.4f} USDT",
+        f"💰 Виртуальный баланс: {stats['balance']:.4f} USDT",
         "",
         "📈 Рынок: Binance USDⓈ-M Futures",
         "⏱ Таймфрейм: 1 час",
         "🧪 Режим: виртуальные сделки",
-        "💵 Стартовый виртуальный баланс: "
-        f"{INITIAL_VIRTUAL_BALANCE:.2f} USDT",
+        f"💵 Стартовый виртуальный баланс: {INITIAL_VIRTUAL_BALANCE:.2f} USDT",
         "",
         "Графики: Entry оранжевый, TP зелёный, SL красный.",
+        "Win rate считается только по закрытым сделкам (TP + SL).",
         "Если одна свеча задевает TP и SL, считается SL.",
         "Реальные ордера отключены.",
     ]
 
-    error = info.get("last_error")
     if error:
-        lines.extend([
-            "",
-            f"⚠️ Последняя ошибка: {str(error)[:300]}",
-        ])
+        lines.extend(["", f"⚠️ Последняя ошибка: {error_text}"])
 
-    return "\n".join(lines)
+    return "\\n".join(lines)
 
 
 def strategy_balance_text(name: str) -> str:
