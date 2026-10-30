@@ -1302,15 +1302,27 @@ async def _scan_strategy(
 
             record_signal(name)
             for trade in new_trades:
-                caption = (
-                    f"🔔 НОВЫЙ СИГНАЛ | {symbol}\n"
-                    f"Стратегия: {name} | ZigZag {signal.get('zigzag_deviation', 10)}% + Fibonacci\n"
-                    f"Направление: {trade['direction']} | Сделка №{trade['entry_number']}\n"
-                    f"🟠 Entry: {trade['entry']:.8g} (Fib {trade['entry_fib']})\n"
-                    f"🟢 TP: {trade['tp']:.8g}\n"
-                    f"🔴 SL: {trade['sl']:.8g}\n"
-                    "Статус: ожидает касания Entry. Виртуальная сделка."
-                )
+                if name == "TrendRide_1H":
+                    caption = (
+                        f"🔔 TREND SIGNAL | {symbol}\n"
+                        f"Стратегия: {name} | EMA 50/200 + ADX\n"
+                        f"Направление: {trade['direction']}\n"
+                        f"🟠 Entry: {trade['entry']:.8g}\n"
+                        f"🟢 TP cap: {trade['tp']:.8g}\n"
+                        f"🔴 Initial SL: {trade['sl']:.8g}\n"
+                        "Управление: ATR trailing, выход при развороте или через 72 часа. "
+                        "Виртуальная сделка."
+                    )
+                else:
+                    caption = (
+                        f"🔔 НОВЫЙ СИГНАЛ | {symbol}\n"
+                        f"Стратегия: {name} | ZigZag {signal.get('zigzag_deviation', 10)}% + Fibonacci\n"
+                        f"Направление: {trade['direction']} | Сделка №{trade['entry_number']}\n"
+                        f"🟠 Entry: {trade['entry']:.8g} (Fib {trade['entry_fib']})\n"
+                        f"🟢 TP: {trade['tp']:.8g}\n"
+                        f"🔴 SL: {trade['sl']:.8g}\n"
+                        "Статус: ожидает касания Entry. Виртуальная сделка."
+                    )
                 await _send_trade_chart(application, trade, candles, "SIGNAL", caption)
 
         except Exception as exc:
