@@ -1302,15 +1302,27 @@ async def _scan_strategy(
 
             record_signal(name)
             for trade in new_trades:
-                caption = (
-                    f"🔔 НОВЫЙ СИГНАЛ | {symbol}\n"
-                    f"Стратегия: {name} | ZigZag {signal.get('zigzag_deviation', 10)}% + Fibonacci\n"
-                    f"Направление: {trade['direction']} | Сделка №{trade['entry_number']}\n"
-                    f"🟠 Entry: {trade['entry']:.8g} (Fib {trade['entry_fib']})\n"
-                    f"🟢 TP: {trade['tp']:.8g}\n"
-                    f"🔴 SL: {trade['sl']:.8g}\n"
-                    "Статус: ожидает касания Entry. Виртуальная сделка."
-                )
+                if name == "TrendRide_1H":
+                    caption = (
+                        f"🔔 TREND SIGNAL | {symbol}\n"
+                        f"Стратегия: {name} | EMA 50/200 + ADX\n"
+                        f"Направление: {trade['direction']}\n"
+                        f"🟠 Entry: {trade['entry']:.8g}\n"
+                        f"🟢 TP cap: {trade['tp']:.8g}\n"
+                        f"🔴 Initial SL: {trade['sl']:.8g}\n"
+                        "Управление: ATR trailing, выход при развороте или через 72 часа. "
+                        "Виртуальная сделка."
+                    )
+                else:
+                    caption = (
+                        f"🔔 НОВЫЙ СИГНАЛ | {symbol}\n"
+                        f"Стратегия: {name} | ZigZag {signal.get('zigzag_deviation', 10)}% + Fibonacci\n"
+                        f"Направление: {trade['direction']} | Сделка №{trade['entry_number']}\n"
+                        f"🟠 Entry: {trade['entry']:.8g} (Fib {trade['entry_fib']})\n"
+                        f"🟢 TP: {trade['tp']:.8g}\n"
+                        f"🔴 SL: {trade['sl']:.8g}\n"
+                        "Статус: ожидает касания Entry. Виртуальная сделка."
+                    )
                 await _send_trade_chart(application, trade, candles, "SIGNAL", caption)
 
         except Exception as exc:
@@ -1319,6 +1331,95 @@ async def _scan_strategy(
                 record_error(name, f"{symbol}: {exc}")
             except Exception:
                 logger.exception("Не удалось записать ошибку стратегии")
+
+
+
+
+def _trendride_indicators(candles: list[dict[str, Any]]) -> tuple[float, float, float, float] | None:
+    if len(candles) < 205:
+        return None
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+
+    def ema(values: list[float], period: int) -> list[float]:
+        alpha = 2.0 / (period + 1.0)
+        result = [values[0]]
+        for value in values[1:]:
+            result.append(alpha * value + (1.0 - alpha) * result[-1])
+        return result
+
+    e50, e200 = ema(closes, 50), ema(closes, 200)
+    tr = [
+        max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        for i in range(1, len(candles))
+    ]
+    atr = sum(tr[-14:]) / min(14, len(tr)) if tr else 0.0
+    return e50[-1], e200[-1], atr, closes[-1]
+
+
+def _trendride_management_update(
+    trade: dict[str, Any],
+    candles: list[dict[str, Any]],
+    current_candle_timestamp: int,
+) -> tuple[dict[str, Any] | None, str | None, float | None]:
+    management = trade.get("management")
+    if not isinstance(management, dict) or management.get("mode") != "trend_following":
+        return None, None, None
+
+    # The last candle from include_current=True is still forming.
+    closed = candles[:-1]
+    state = _trendride_indicators(closed)
+    if state is None:
+        return None, None, None
+    ema50, _ema200, atr, close = state
+    latest_ts = int(closed[-1].get("timestamp", 0))
+    if latest_ts > current_candle_timestamp:
+        return None, None, None
+    if latest_ts <= int(trade.get("management_last_candle") or 0):
+        return None, None, None
+
+    entry_time = trade.get("entry_time")
+    if entry_time:
+        try:
+            entered = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00"))
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - entered.astimezone(timezone.utc)).total_seconds() / 3600.0
+            if age_hours >= float(management.get("max_hold_hours", 72)):
+                return {"management_last_candle": latest_ts}, "TIME_EXIT", close
+        except (TypeError, ValueError):
+            pass
+
+    if len(closed) >= 2:
+        previous = _trendride_indicators(closed[:-1])
+        if previous is not None:
+            previous_close = float(closed[-2]["close"])
+            if trade.get("direction") == "LONG":
+                reversed_trend = close < ema50 and previous_close < previous[0]
+            else:
+                reversed_trend = close > ema50 and previous_close > previous[0]
+            if reversed_trend:
+                return {"management_last_candle": latest_ts}, "TREND_REVERSAL", close
+
+    if atr <= 0:
+        return {"management_last_candle": latest_ts}, None, None
+
+    latest = closed[-1]
+    highest = max(float(trade.get("highest_price") or trade.get("entry") or 0), float(latest["high"]))
+    lowest = min(float(trade.get("lowest_price") or trade.get("entry") or 0), float(latest["low"]))
+    old_sl = float(trade["sl"])
+    multiplier = float(management.get("trailing_atr", 2.8))
+    if trade.get("direction") == "LONG":
+        new_sl = max(old_sl, highest - multiplier * atr)
+    else:
+        new_sl = min(old_sl, lowest + multiplier * atr)
+    return {
+        "sl": new_sl,
+        "highest_price": highest,
+        "lowest_price": lowest,
+        "management_last_candle": latest_ts,
+    }, None, None
 
 
 async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1332,7 +1433,7 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
     for symbol in symbols:
         try:
             candle_cache[symbol] = await asyncio.to_thread(
-                get_klines, symbol, 30, include_current=True
+                get_klines, symbol, 250, include_current=True
             )
         except Exception:
             logger.exception("Не удалось обновить свечи для мониторинга %s", symbol)
@@ -1382,14 +1483,31 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             if trade["status"] == "OPEN" and not filled_this_candle and not is_entry_candle:
                 outcome = touched_exit(trade, candle)
-                if outcome:
-                    exit_price = float(trade["sl"] if outcome == "SL" else trade["tp"])
-                    updates = close_trade(trade, outcome, exit_price)
+                exit_reason = outcome
+                exit_price = None
+                management = trade.get("management")
+                if not outcome and isinstance(management, dict) and management.get("mode") == "trend_following":
+                    management_updates, custom_reason, custom_price = _trendride_management_update(trade, candles, candle_ts)
+                    if management_updates:
+                        trade = update_trade(trade["id"], management_updates) or {**trade, **management_updates}
+                    if custom_reason:
+                        exit_reason = custom_reason
+                        exit_price = float(custom_price if custom_price is not None else candle["close"])
+
+                if exit_reason:
+                    if exit_price is None:
+                        exit_price = float(trade["sl"] if exit_reason == "SL" else trade["tp"])
+                    result_status = exit_reason if exit_reason in {"TP", "SL"} else (
+                        "TP" if ((exit_price - float(trade["entry"])) *
+                                 (1.0 if trade["direction"] == "LONG" else -1.0)) >= 0 else "SL"
+                    )
+                    updates = close_trade(trade, result_status, exit_price)
+                    updates["close_reason"] = exit_reason
                     updates["last_checked_candle"] = candle_ts
                     trade = update_trade(trade["id"], updates) or {**trade, **updates}
-                    emoji = "✅" if outcome == "TP" else "❌"
+                    emoji = "✅" if result_status == "TP" else "❌"
                     caption = (
-                        f"{emoji} {outcome} | {trade['symbol']}\n"
+                        f"{emoji} {exit_reason} | {trade['symbol']}\n"
                         f"Стратегия: {trade['strategy']} | {trade['direction']}\n"
                         f"Entry: {trade['entry']:.8g} | Exit: {exit_price:.8g}\n"
                         f"PnL gross: {float(trade.get('pnl_gross') or 0):+.4f} USDT\n"
@@ -1397,10 +1515,11 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"PnL net: {float(trade.get('pnl_net') or 0):+.4f} USDT\n"
                         "Результат виртуальной сделки."
                     )
-                    # TP and SL always get their own final chart with an EXIT marker.
                     chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
-                    await _send_trade_chart(application, trade, chart_candles, outcome, caption)
+                    await _send_trade_chart(application, trade, chart_candles, result_status, caption)
                     break
+
+                # Trailing stop is moved only after the old stop was checked.
                 trade = update_trade(trade["id"], {"last_checked_candle": candle_ts}) or trade
 
 
