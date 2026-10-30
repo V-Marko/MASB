@@ -1349,6 +1349,7 @@ def _trendride_indicators(candles: list[dict[str, Any]]) -> tuple[float, float, 
 def _trendride_management_update(
     trade: dict[str, Any],
     candles: list[dict[str, Any]],
+    current_candle_timestamp: int,
 ) -> tuple[dict[str, Any] | None, str | None, float | None]:
     management = trade.get("management")
     if not isinstance(management, dict) or management.get("mode") != "trend_following":
@@ -1361,6 +1362,8 @@ def _trendride_management_update(
         return None, None, None
     ema50, _ema200, atr, close = state
     latest_ts = int(closed[-1].get("timestamp", 0))
+    if latest_ts > current_candle_timestamp:
+        return None, None, None
     if latest_ts <= int(trade.get("management_last_candle") or 0):
         return None, None, None
 
@@ -1472,7 +1475,7 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                 exit_price = None
                 management = trade.get("management")
                 if not outcome and isinstance(management, dict) and management.get("mode") == "trend_following":
-                    management_updates, custom_reason, custom_price = _trendride_management_update(trade, candles)
+                    management_updates, custom_reason, custom_price = _trendride_management_update(trade, candles, candle_ts)
                     if management_updates:
                         trade = update_trade(trade["id"], management_updates) or {**trade, **management_updates}
                     if custom_reason:
