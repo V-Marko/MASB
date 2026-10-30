@@ -1495,12 +1495,12 @@ async def monitor_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                     trade = update_trade(trade["id"], updates) or {**trade, **updates}
                     emoji = "✅" if result_status == "TP" else "❌"
                     caption = (
-                        f"{emoji} {exit_reason} | {trade['symbol']}\\n"
-                        f"Стратегия: {trade['strategy']} | {trade['direction']}\\n"
-                        f"Entry: {trade['entry']:.8g} | Exit: {exit_price:.8g}\\n"
-                        f"PnL gross: {float(trade.get('pnl_gross') or 0):+.4f} USDT\\n"
-                        f"Комиссии: {float(trade.get('fees') or 0):.4f} USDT\\n"
-                        f"PnL net: {float(trade.get('pnl_net') or 0):+.4f} USDT\\n"
+                        f"{emoji} {exit_reason} | {trade['symbol']}\n"
+                        f"Стратегия: {trade['strategy']} | {trade['direction']}\n"
+                        f"Entry: {trade['entry']:.8g} | Exit: {exit_price:.8g}\n"
+                        f"PnL gross: {float(trade.get('pnl_gross') or 0):+.4f} USDT\n"
+                        f"Комиссии: {float(trade.get('fees') or 0):.4f} USDT\n"
+                        f"PnL net: {float(trade.get('pnl_net') or 0):+.4f} USDT\n"
                         "Результат виртуальной сделки."
                     )
                     chart_candles = await _event_chart_candles(str(trade["symbol"]), candles)
