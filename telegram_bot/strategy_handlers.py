@@ -22,6 +22,12 @@ from telegram.ext import (
 )
 
 from services.binance_market import get_klines
+from services.binance_futures import (
+    BinanceFuturesError,
+    real_trading_enabled,
+    submit_signal_order,
+    sync_real_order_states,
+)
 from services.strategy_manager import (
     get_last_candle,
     get_symbols,
@@ -30,6 +36,8 @@ from services.strategy_manager import (
     record_signal,
     set_last_candle,
     set_strategy_enabled,
+    set_strategy_real_enabled,
+    strategy_real_enabled,
     sync_strategies,
 )
 
@@ -221,11 +229,24 @@ def strategy_keyboard(name: str) -> InlineKeyboardMarkup:
         else "🔕 Уведомления: ВЫКЛ"
     )
 
+    real_mode = strategy_real_enabled(name)
+    real_label = (
+        "🔴 REAL: ВКЛ (нажми для DEMO)"
+        if real_mode
+        else "🧪 DEMO (нажми для REAL)"
+    )
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 toggle_label,
                 callback_data=f"masb:toggle:{name}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                real_label,
+                callback_data=f"masb:real:{name}",
             )
         ],
         [
@@ -302,6 +323,8 @@ def strategy_details_text(name: str) -> str:
     notify = notifications_enabled(name)
     notify_status = "ВКЛЮЧЕНЫ" if notify else "ВЫКЛЮЧЕНЫ"
     stats = trade_stats(name)
+    real_mode = strategy_real_enabled(name)
+    trading_mode = "🔴 REAL разрешён для этой стратегии" if real_mode else "🧪 DEMO — реальные ордера запрещены"
 
     error = info.get("last_error")
     error_text = str(error)[:300] if error else "нет"
@@ -325,13 +348,13 @@ def strategy_details_text(name: str) -> str:
         "",
         "📈 Рынок: Binance USDⓈ-M Futures",
         "⏱ Таймфрейм: 1 час",
-        "🧪 Режим: виртуальные сделки",
+        f"🛡️ Режим исполнения: {trading_mode}",
         f"💵 Стартовый виртуальный баланс: {INITIAL_VIRTUAL_BALANCE:.2f} USDT",
         "",
         "Графики: Entry оранжевый, TP зелёный, SL красный.",
         "Win rate считается только по закрытым сделкам (TP + SL).",
         "Если одна свеча задевает TP и SL, считается SL.",
-        "Реальные ордера отключены.",
+        "REAL-доступ определяется отдельно для каждой стратегии.",
     ]
 
     if error:
@@ -916,6 +939,29 @@ async def strategy_callback(
         )
         return
 
+    if action == "real":
+        current_real = strategy_real_enabled(name)
+        try:
+            set_strategy_real_enabled(name, not current_real)
+        except Exception as exc:
+            logger.exception("Не удалось изменить REAL/Demo режим %s", name)
+            await query.edit_message_text(
+                f"❌ Не удалось изменить режим исполнения: {exc}",
+                reply_markup=strategy_keyboard(name),
+            )
+            return
+
+        mode_text = "🔴 REAL разрешён" if not current_real else "🧪 DEMO включён"
+        await query.edit_message_text(
+            text=(
+                f"{strategy_details_text(name)}\n\n"
+                f"✅ Режим изменён: {mode_text}.\n"
+                "Глобальное включение REAL всё равно зависит от MASB_REAL_TRADING_ENABLED."
+            ),
+            reply_markup=strategy_keyboard(name),
+        )
+        return
+
     if action == "notify":
         try:
             toggle_notifications(name)
@@ -1296,6 +1342,38 @@ async def _scan_strategy(
             if signal is None or not signal.get("orders"):
                 continue
 
+            # REAL execution is hard-locked to fibZZ10. All other strategies
+            # continue through the existing virtual trade pipeline.
+            if name == "fibZZ10" and real_trading_enabled():
+                try:
+                    trade = await asyncio.to_thread(
+                        submit_signal_order, name, symbol, signal, timestamp
+                    )
+                except BinanceFuturesError as exc:
+                    logger.warning("REAL-сигнал %s не отправлен: %s", symbol, exc)
+                    record_error(name, f"REAL {symbol}: {exc}")
+                    continue
+                except Exception as exc:
+                    logger.exception("Неожиданная ошибка REAL-исполнения %s", symbol)
+                    record_error(name, f"REAL {symbol}: {exc}")
+                    continue
+
+                record_signal(name)
+                caption = (
+                    f"🔴 REAL FUTURES | {symbol}\n"
+                    f"Стратегия: fibZZ10 | {trade['direction']}\n"
+                    f"Entry LIMIT: {trade['entry']:.8g}\n"
+                    f"TP: {trade['tp']:.8g}\n"
+                    f"SL: {trade['sl']:.8g}\n"
+                    f"Количество: {trade['quantity']:.8g}\n"
+                    f"Плечо: {trade['leverage']}x | Риск с комиссиями: "
+                    f"≈ {trade['estimated_risk_with_fees']:.4f} USDT\n"
+                    f"Биржевой Order ID: {trade.get('entry_order_id')}\n"
+                    "Статус: LIMIT выставлен; защитные SL/TP переданы Binance."
+                )
+                await _send_trade_chart(application, trade, candles, "REAL", caption)
+                continue
+
             new_trades = add_signal_orders(name, symbol, signal, timestamp)
             if not new_trades:
                 continue
@@ -1431,6 +1509,17 @@ async def scan_enabled_strategies(
         logger.exception("Ошибка фонового сканирования MASB")
 
 
+async def monitor_real_orders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not real_trading_enabled():
+        return
+    try:
+        changed = await asyncio.to_thread(sync_real_order_states)
+        if changed:
+            logger.info("Синхронизировано REAL-сделок: %s", changed)
+    except Exception:
+        logger.exception("Ошибка синхронизации REAL Futures")
+
+
 # ============================================================
 # REGISTER
 # ============================================================
@@ -1481,6 +1570,13 @@ def register_strategy_handlers(application: Application) -> None:
         first=15,
         job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 30},
         name="masb_trade_monitor",
+    )
+    application.job_queue.run_repeating(
+        monitor_real_orders,
+        interval=30,
+        first=20,
+        job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 15},
+        name="masb_real_order_monitor",
     )
 
     logger.info("Менеджер стратегий и монитор виртуальных сделок зарегистрированы.")

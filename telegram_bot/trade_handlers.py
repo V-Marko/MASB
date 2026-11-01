@@ -16,6 +16,7 @@ from services.notification_settings import (
     toggle_notifications,
 )
 from services.signal_history import get_signals
+from services.binance_futures import get_real_order_history
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,20 @@ async def cmd_trades(
             f"RR: 1:{signal.get('rr', 3)}",
             f"Время UTC: {signal.get('time', '?')}",
         ])
+
+    real_orders = get_real_order_history()
+    if real_orders:
+        lines.extend(["", "🔴 REAL Binance Futures — последние заявки:"])
+        for trade in real_orders[-10:][::-1]:
+            status = str(trade.get("status", "?"))
+            status_icon = "🟡" if status == "PENDING" else ("🟢" if status == "OPEN" else "⚪")
+            lines.extend([
+                "",
+                f"{status_icon} {trade.get('symbol', '?')} {trade.get('direction', '?')} — {status}",
+                f"Entry: {_format_price(trade.get('entry', 0))} | TP: {_format_price(trade.get('tp', 0))} | SL: {_format_price(trade.get('sl', 0))}",
+                f"Qty: {trade.get('quantity', '?')} | Leverage: {trade.get('leverage', '?')}x | Risk est.: {float(trade.get('estimated_risk_with_fees') or 0):.4f} USDT",
+                f"Order ID: {trade.get('entry_order_id', '?')}",
+            ])
 
     # Telegram ограничивает длину сообщения.
     output = "\n".join(lines)

@@ -50,6 +50,8 @@ def _default_state() -> dict[str, Any]:
                 "last_candle": {},
                 "signals": 0,
                 "last_error": None,
+                # REAL execution is opt-in per strategy.
+                "real_enabled": False,
             }
         },
     }
@@ -110,6 +112,24 @@ def set_strategy_enabled(name: str, enabled: bool) -> None:
             raise ValueError(f"Стратегия не зарегистрирована: {name}")
 
         state["strategies"][name]["enabled"] = bool(enabled)
+        _write_state(state)
+
+
+def strategy_real_enabled(name: str) -> bool:
+    """Return whether this strategy is explicitly allowed to submit REAL orders."""
+    with _LOCK:
+        state = _read_state()
+        item = state.get("strategies", {}).get(name, {})
+        return bool(item.get("real_enabled", False))
+
+
+def set_strategy_real_enabled(name: str, enabled: bool) -> None:
+    """Explicitly opt a registered strategy into/out of REAL execution."""
+    with _LOCK:
+        state = _read_state()
+        if name not in state["strategies"]:
+            raise ValueError(f"Стратегия не зарегистрирована: {name}")
+        state["strategies"][name]["real_enabled"] = bool(enabled)
         _write_state(state)
 
 
@@ -177,6 +197,7 @@ def add_strategy(name: str) -> None:
             "last_candle": {},
             "signals": 0,
             "last_error": None,
+            "real_enabled": False,
         }
 
         _write_state(state)
@@ -210,6 +231,9 @@ def sync_strategies(registered_names: set[str]) -> None:
                 item.setdefault("last_candle", {})
                 item.setdefault("signals", 0)
                 item.setdefault("last_error", None)
+                # Existing projects are migrated safely: no strategy gets REAL
+                # permission merely because the code was updated.
+                item.setdefault("real_enabled", False)
 
             synced[name] = item
 

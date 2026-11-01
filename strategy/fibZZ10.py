@@ -13,7 +13,8 @@ NAME = "fibZZ10"
 ZIGZAG_DEVIATION = 10.0
 
 INITIAL_CAPITAL = 100.0
-POSITION_CAPITAL_PERCENT = 50.0
+RISK_PERCENT = 1.0
+MAX_LEVERAGE = 5
 COMMISSION_PER_SIDE = 0.00055
 RISK_REWARD = 3.0
 
@@ -134,31 +135,49 @@ def calculate_green_fibonacci(
 # ============================================================
 # CAPITAL MANAGEMENT
 #
-# Position notional = 50% of current capital.
-# No leverage is applied here.
+# Position size is calculated from a 1% cash risk budget, including
+# estimated entry/exit commissions. Notional is capped at 5x capital.
 # ============================================================
 
 def calculate_position(
     capital: float,
     entry: float,
+    sl: float,
 ) -> dict[str, float]:
+    """Размер позиции от денежного риска, а не от процента маржи.
+
+    Риск включает оценку комиссии входа и выхода. Плечо ограничивает
+    номинал позиции, но не увеличивает допустимый убыток.
+    """
     capital = float(capital)
     entry = float(entry)
+    sl = float(sl)
 
-    if capital <= 0:
-        raise ValueError("Капитал должен быть больше нуля.")
+    if capital <= 0 or entry <= 0 or sl <= 0 or entry == sl:
+        raise ValueError("Капитал, Entry и SL должны быть корректными положительными ценами.")
 
-    if entry <= 0:
-        raise ValueError("Entry должен быть больше нуля.")
+    risk_budget = capital * RISK_PERCENT / 100.0
+    stop_distance = abs(entry - sl)
+    fee_per_unit = (entry + sl) * COMMISSION_PER_SIDE
+    risk_per_unit = stop_distance + fee_per_unit
+    if risk_per_unit <= 0:
+        raise ValueError("Некорректный риск на единицу количества.")
 
-    position_value = capital * POSITION_CAPITAL_PERCENT / 100.0
-    quantity = position_value / entry
+    quantity = risk_budget / risk_per_unit
+    max_notional = capital * MAX_LEVERAGE
+    max_quantity = max_notional / entry
+    quantity = min(quantity, max_quantity)
+    position_value = quantity * entry
 
     return {
         "capital": capital,
+        "risk_budget": risk_budget,
+        "estimated_total_risk": quantity * risk_per_unit,
         "position_value": position_value,
         "quantity": quantity,
         "estimated_entry_fee": position_value * COMMISSION_PER_SIDE,
+        "estimated_exit_fee": quantity * sl * COMMISSION_PER_SIDE,
+        "max_leverage": float(MAX_LEVERAGE),
     }
 
 
@@ -193,6 +212,7 @@ def _make_order(
     position = calculate_position(
         capital=capital,
         entry=entry,
+        sl=sl,
     )
 
     order = LimitOrder(
@@ -400,7 +420,8 @@ def analyze(
     result["capital"] = float(capital)
     result["commission_per_side"] = COMMISSION_PER_SIDE
     result["initial_capital"] = INITIAL_CAPITAL
-    result["position_capital_percent"] = POSITION_CAPITAL_PERCENT
+    result["risk_percent"] = RISK_PERCENT
+    result["max_leverage"] = MAX_LEVERAGE
     result["rr"] = RISK_REWARD
     result["max_entries"] = MAX_ENTRIES
     result["entry_3_enabled"] = ENABLE_ENTRY_3
@@ -479,7 +500,8 @@ if __name__ == "__main__":
     print(f"Стратегия {NAME}")
     print(f"ZigZag: {ZIGZAG_DEVIATION}%")
     print(f"Начальный капитал: {INITIAL_CAPITAL} USDT")
-    print(f"Размер позиции: {POSITION_CAPITAL_PERCENT}%")
+    print(f"Риск на сделку: {RISK_PERCENT}%")
+    print(f"Максимальное плечо: {MAX_LEVERAGE}x")
     print(f"RR: 1:{RISK_REWARD}")
     print(f"Комиссия за сторону: {COMMISSION_PER_SIDE * 100:.3f}%")
     print(f"Максимум входов: {MAX_ENTRIES}")
