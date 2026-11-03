@@ -63,7 +63,6 @@ SETTINGS_FILE = DATA_DIR / "strategy_settings.json"
 
 INITIAL_VIRTUAL_BALANCE = 100.0
 
-# Стратегии подхватываются автоматически из папки strategy/ (см. strategy/registry.py).
 STRATEGIES: dict[str, Callable[..., Any]]
 STRATEGY_FORMATTERS: dict[str, Callable[[dict[str, Any] | None], str]]
 STRATEGIES, STRATEGY_FORMATTERS, _ = discover_strategies()
@@ -476,7 +475,7 @@ def report_strategy_keyboard(report_type: str) -> InlineKeyboardMarkup:
 
 
 async def show_active_trades_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send one photo message per active trade, with its chart and full trade details."""
+
     trades = list(reversed(active_trades()[-30:]))
     if not trades:
         await context.bot.send_message(
@@ -632,7 +631,6 @@ def pnl_report_text(strategy_name: str | None) -> str:
     )
 
 async def _refresh_open_trade_prices(trades: list[dict[str, Any]]) -> None:
-    """Обновить текущие цены открытых позиций перед расчётом плавающего PnL."""
     symbols = sorted({
         str(trade.get("symbol", "")).upper()
         for trade in trades
@@ -657,7 +655,6 @@ async def _refresh_open_trade_prices(trades: list[dict[str, Any]]) -> None:
 
 
 def pnl_open_trades_text(strategy_name: str | None) -> tuple[str, InlineKeyboardMarkup]:
-    """Сформировать карточки открытых/ожидающих сделок и кнопки графиков."""
     trades = active_trades(strategy_name)
     trades = list(reversed(trades[-30:]))
     title = "Все стратегии" if strategy_name is None else strategy_name
@@ -715,7 +712,6 @@ def history_report_messages(
     strategy_name: str | None,
     trades_per_message: int = 10,
 ) -> list[str]:
-    """Сформировать историю сообщениями: сводка + не более 10 сделок в каждом."""
     all_matching_trades = all_trades()
     if strategy_name is not None:
         all_matching_trades = [
@@ -1183,7 +1179,6 @@ def _retry_after_seconds(exc: RetryAfter) -> float:
 
 
 async def _deferred_tg_send(what: str, factory: Callable[[], Awaitable[Any]], delay: float) -> None:
-    """Retry a rate-limited notification in the background, without blocking a scanner job."""
     await asyncio.sleep(delay)
     try:
         await _tg_send(what, factory)
@@ -1195,12 +1190,7 @@ async def _tg_send(
     what: str,
     factory: Callable[[], Awaitable[Any]],
 ) -> Any:
-    """Send serially; defer long Telegram RetryAfter delays so jobs can finish.
 
-    RetryAfter >= 60s is rescheduled in the background instead of holding a
-    strategy/panel job open for many minutes. Short waits and network errors
-    are retried normally. BadRequest is propagated to the caller.
-    """
     global _TG_LAST_SEND, _TG_BLOCKED_UNTIL
 
     last_exc: Exception | None = None
@@ -1325,6 +1315,34 @@ async def _send_trade_chart(
         logger.exception("Не удалось отправить резервное сообщение о сделке %s", label)
 
 
+def _is_transient_real_error(exc: Exception) -> bool:
+    text = str(exc)
+    markers = (
+        "Ошибка запроса Binance",
+        "HTTP 5",
+        "HTTP 429",
+        "HTTP 418",
+        "-1021",
+        "-1003",
+        "-1001",
+        "-1007",
+    )
+    return any(marker in text for marker in markers)
+
+
+async def _notify_owner(application: Application, text: str) -> None:
+    owner = _owner_id()
+    if owner is None:
+        return
+    try:
+        await _tg_send(
+            "notify",
+            lambda: application.bot.send_message(chat_id=owner, text=text[:3500], **_TG_TIMEOUTS),
+        )
+    except Exception:
+        logger.exception("Не удалось отправить уведомление владельцу")
+
+
 async def _scan_strategy(
     application: Application,
     name: str,
@@ -1358,9 +1376,17 @@ async def _scan_strategy(
             if signal is None or not signal.get("orders"):
                 continue
 
-            # REAL execution is hard-locked to fibZZ10. All other strategies
-            # continue through the existing virtual trade pipeline.
-            if name == "fibZZ10" and real_trading_enabled():
+            if strategy_real_enabled(name) and not signal.get("signal_only"):
+                if not real_trading_enabled():
+                    msg = (
+                        f"REAL включён для {name}, но MASB_REAL_TRADING_ENABLED=false в .env — "
+                        f"сделка {symbol} НЕ отправлена на Binance."
+                    )
+                    logger.warning(msg)
+                    record_error(name, msg)
+                    await _notify_owner(application, f"⚠️ {msg}")
+                    continue
+
                 try:
                     trade = await asyncio.to_thread(
                         submit_signal_order, name, symbol, signal, timestamp
@@ -1368,24 +1394,39 @@ async def _scan_strategy(
                 except BinanceFuturesError as exc:
                     logger.warning("REAL-сигнал %s не отправлен: %s", symbol, exc)
                     record_error(name, f"REAL {symbol}: {exc}")
+                    if _is_transient_real_error(exc):
+                        # Сеть/таймаут/5xx: не считаем свечу обработанной -> повтор на след. скане.
+                        set_last_candle(name, symbol, int(previous_timestamp or 0))
+                    await _notify_owner(
+                        application,
+                        f"⚠️ REAL {name} {symbol}: вход НЕ выставлен\n{exc}"
+                        + ("\nПовторю на следующем скане." if _is_transient_real_error(exc) else ""),
+                    )
                     continue
                 except Exception as exc:
                     logger.exception("Неожиданная ошибка REAL-исполнения %s", symbol)
                     record_error(name, f"REAL {symbol}: {exc}")
+                    await _notify_owner(application, f"⚠️ REAL {name} {symbol}: ошибка {exc}")
                     continue
 
                 record_signal(name)
+                if trade.get("status") == "OPEN":
+                    status_line = "Статус: вход исполнен, SL/TP выставлены на Binance."
+                else:
+                    status_line = (
+                        "Статус: LIMIT выставлен на Binance. SL/TP будут выставлены "
+                        "автоматически сразу после исполнения входа."
+                    )
                 caption = (
                     f"🔴 REAL FUTURES | {symbol}\n"
-                    f"Стратегия: fibZZ10 | {trade['direction']}\n"
+                    f"Стратегия: {name} | {trade['direction']}\n"
                     f"Entry LIMIT: {trade['entry']:.8g}\n"
                     f"TP: {trade['tp']:.8g}\n"
                     f"SL: {trade['sl']:.8g}\n"
                     f"Количество: {trade['quantity']:.8g}\n"
-                    f"Плечо: {trade['leverage']}x | Риск с комиссиями: "
-                    f"≈ {trade['estimated_risk_with_fees']:.4f} USDT\n"
+                    f"Плечо: {trade['leverage']}x | Маржа: {trade.get('margin_usdt', 0):.2f} USDT\n"
                     f"Биржевой Order ID: {trade.get('entry_order_id')}\n"
-                    "Статус: LIMIT выставлен; защитные SL/TP переданы Binance."
+                    f"{status_line}"
                 )
                 await _send_trade_chart(application, trade, candles, "REAL", caption)
                 continue
@@ -1589,7 +1630,7 @@ def register_strategy_handlers(application: Application) -> None:
     )
     application.job_queue.run_repeating(
         monitor_real_orders,
-        interval=30,
+        interval=10,
         first=20,
         job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 15},
         name="masb_real_order_monitor",

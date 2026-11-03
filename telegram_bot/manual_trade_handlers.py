@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-"""Manual LIMIT trading for Binance Futures TESTNET ONLY.
 
-This module deliberately hardcodes the Binance Futures testnet host. It has no
-production endpoint and cannot submit orders to the real-money account.
-"""
 import asyncio
 import hashlib
 import hmac

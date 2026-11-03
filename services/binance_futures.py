@@ -53,9 +53,38 @@ def _strategy_margin_usdt() -> float:
     return value
 
 
+def _num(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 def real_trading_enabled() -> bool:
     return os.getenv("MASB_REAL_TRADING_ENABLED", "false").strip().lower() in {
         "1", "true", "yes", "on"
+    }
+
+
+def real_status_summary() -> dict[str, Any]:
+    """Данные для экрана «REAL статус» (без обращений к Binance)."""
+    try:
+        margin = _strategy_margin_usdt()
+    except BinanceFuturesError:
+        margin = None
+    try:
+        orders = _read_state().get("orders", [])
+    except BinanceFuturesError:
+        orders = []
+    active = [o for o in orders if o.get("status") in {"PENDING", "OPEN"}]
+    return {
+        "global_enabled": real_trading_enabled(),
+        "has_keys": bool(os.getenv("BINANCE_API_KEY") and os.getenv("BINANCE_API_SECRET")),
+        "margin_usdt": margin,
+        "leverage": MAX_LEVERAGE,
+        "max_positions": MAX_OPEN_POSITIONS,
+        "active_orders": active,
     }
 
 
@@ -263,21 +292,29 @@ def _attach_protection(record: dict[str, Any]) -> dict[str, Any]:
         "sl_client_order_id": sl_client_id,
         "tp_client_order_id": tp_client_id,
     }
-    try:
-        sl_result = _algo_order(symbol, exit_side, "STOP_MARKET", sl_price, sl_client_id)
-        updates["sl_algo_id"] = sl_result.get("algoId")
-    except Exception:
-        logger.exception("Не удалось поставить SL для %s после входа", symbol)
-        updates["protect_error"] = "sl_failed"
-        return updates
-    try:
-        tp_result = _algo_order(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, tp_client_id)
-        updates["tp_algo_id"] = tp_result.get("algoId")
+    if record.get("sl_algo_id"):
+        updates["sl_algo_id"] = record["sl_algo_id"]
+    else:
+        try:
+            sl_result = _algo_order(symbol, exit_side, "STOP_MARKET", sl_price, sl_client_id)
+            updates["sl_algo_id"] = sl_result.get("algoId")
+        except Exception:
+            logger.exception("Не удалось поставить SL для %s после входа", symbol)
+            updates["protect_error"] = "sl_failed"
+            return updates
+    if record.get("tp_algo_id"):
+        updates["tp_algo_id"] = record["tp_algo_id"]
         updates["protect_pending"] = False
-    except Exception:
-        logger.exception("Не удалось поставить TP для %s после входа", symbol)
-        updates["protect_error"] = "tp_failed"
-        # keep SL; operator can fix TP manually
+    else:
+        try:
+            tp_result = _algo_order(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, tp_client_id)
+            updates["tp_algo_id"] = tp_result.get("algoId")
+            updates["protect_pending"] = False
+            updates.pop("protect_error", None)
+        except Exception:
+            logger.exception("Не удалось поставить TP для %s после входа", symbol)
+            updates["protect_error"] = "tp_failed"
+            updates["protect_pending"] = True  # будет повторено в sync_real_order_states
     return updates
 
 
@@ -455,6 +492,18 @@ def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], cand
             "protect_pending": protect_pending,
             "entry_number": int(order.get("entry_number", 1)),
             "candle_timestamp": int(candle_timestamp),
+            # Данные для графика: зигзаг и уровни Фибоначчи (как в демо-сделках).
+            "entry_fib": float(order.get("entry_fib", 0.0) or 0.0),
+            "tp_fib": float(order.get("tp_fib", 0.0) or 0.0),
+            "is_green_tp": bool(order.get("is_green_tp", False)),
+            "swing_start": _num(signal.get("swing_start")),
+            "swing_end": _num(signal.get("swing_end")),
+            "swing_start_index": int(signal.get("swing_start_index", 0) or 0),
+            "swing_end_index": int(signal.get("swing_end_index", 0) or 0),
+            "swing_start_timestamp": signal.get("swing_start_timestamp"),
+            "swing_end_timestamp": signal.get("swing_end_timestamp"),
+            "fibonacci": dict(signal.get("fibonacci") or {}),
+            "green_fibonacci": dict(signal.get("green_fibonacci") or {}),
         }
         state = _read_state()
         state["orders"].append(record)
@@ -732,6 +781,16 @@ def sync_real_order_states() -> int:
                 except BinanceFuturesError as exc:
                     # -2013 means order not found; do not silently assume it filled.
                     logger.warning("Не удалось сверить REAL-ордер %s: %s", record.get("entry_client_order_id"), exc)
+            elif (
+                record.get("status") == "OPEN"
+                and abs(position_amount) > 0
+                and (record.get("protect_pending") or not record.get("sl_algo_id") or not record.get("tp_algo_id"))
+            ):
+                # Позиция есть, но SL/TP не полностью выставлены — повторяем.
+                try:
+                    updates.update(_attach_protection(record))
+                except Exception:
+                    logger.exception("Не удалось повторно навесить SL/TP на %s", symbol)
             elif record.get("status") == "OPEN" and abs(position_amount) == 0:
                 # Position has been closed by TP/SL or manually. Remove the other
                 # conditional trigger and any unfilled remainder of the entry.

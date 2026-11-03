@@ -255,7 +255,6 @@ def _confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 async def start_manual_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point from main menu button 🔴 Trade."""
     message = update.effective_message
     if message is None:
         return ConversationHandler.END

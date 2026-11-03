@@ -19,6 +19,7 @@ from telegram_bot.keyboards import (
     BTN_ACTIVE_TRADES,
     BTN_STRATEGIES,
     BTN_TRADE,
+    BTN_REAL_STATUS,
     BTN_SETTINGS,
     BTN_HELP,
     BTN_HOME,
@@ -34,9 +35,6 @@ OWNER_FILE = DATA_DIR / "telegram_owner.json"
 MESSAGES_FILE = DATA_DIR / "telegram_messages.json"
 
 
-# ============================================================
-# JSON STORAGE
-# ============================================================
 def read_json(path: Path, default: Any) -> Any:
     try:
         if not path.exists():
@@ -256,6 +254,68 @@ def get_strategies_text() -> str:
         )
 
 
+def get_real_status_text() -> str:
+    try:
+        from services.binance_futures import real_status_summary
+        from services.strategy_manager import list_strategies
+
+        info = real_status_summary()
+        strategies = list_strategies()
+
+        lines = ["🔴 REAL статус", ""]
+        if info["global_enabled"]:
+            lines.append("Глобальный переключатель: 🟢 ВКЛ (MASB_REAL_TRADING_ENABLED=true)")
+        else:
+            lines.append("Глобальный переключатель: ⚪ ВЫКЛ (MASB_REAL_TRADING_ENABLED=false)")
+            lines.append("⚠️ Пока он выключен, реальные ордера НЕ отправляются.")
+        lines.append("API-ключи Binance: " + ("✅ найдены" if info["has_keys"] else "❌ не заданы в .env"))
+        margin = info["margin_usdt"]
+        margin_text = f"{margin:g} USDT" if margin is not None else "ошибка в .env"
+        lines.append(
+            f"Маржа на сделку: {margin_text} | Плечо: {info['leverage']}x | "
+            f"Макс. символов: {info['max_positions']}"
+        )
+        lines.append("")
+        lines.append("Стратегии:")
+
+        real_on = []
+        for name, item in strategies.items():
+            real = bool(item.get("real_enabled", False))
+            enabled = bool(item.get("enabled", False))
+            if real:
+                real_on.append(name)
+            real_mark = "🔴 REAL" if real else "⚪ demo"
+            run_mark = "работает" if enabled else "выключена"
+            lines.append(f"• {name}: {real_mark} ({run_mark})")
+            if real and not enabled:
+                lines.append("   ⚠️ REAL включён, но стратегия выключена — сигналов не будет")
+        if not strategies:
+            lines.append("• Стратегии не зарегистрированы")
+
+        lines.append("")
+        if real_on and info["global_enabled"]:
+            lines.append(f"✅ Реально торгуют: {', '.join(real_on)}")
+        elif real_on:
+            lines.append(f"⚠️ REAL отмечен у: {', '.join(real_on)}, но глобальный переключатель выключен")
+        else:
+            lines.append("Ни одна стратегия не включена в REAL.")
+
+        active = info["active_orders"]
+        lines.append("")
+        lines.append(f"Активные реальные ордера: {len(active)}")
+        for order in active[:10]:
+            status = "ждёт вход (LIMIT)" if order.get("status") == "PENDING" else "позиция открыта"
+            lines.append(
+                f"• {order.get('symbol')} {order.get('direction')} | {order.get('strategy')} | {status}"
+            )
+        lines.append("")
+        lines.append("Включить/выключить REAL: 🧩 Стратегии → выбрать стратегию.")
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("Не удалось собрать REAL статус")
+        return "🔴 REAL статус\n\nНе удалось загрузить данные. Проверь логи приложения."
+
+
 def get_section_text(
     section: str,
     context: ContextTypes.DEFAULT_TYPE,
@@ -284,6 +344,9 @@ def get_section_text(
     if section == BTN_STRATEGIES:
         return get_strategies_text()
 
+    if section == BTN_REAL_STATUS:
+        return get_real_status_text()
+
     if section == BTN_HELP:
         return (
             "❔ Помощь\n\n"
@@ -291,6 +354,7 @@ def get_section_text(
             "💰 Баланс — информация о балансе\n"
             "📈 Active trades — открытые сделки, PnL и графики\n"
             "🧩 Стратегии — список стратегий\n"
+            "🔴 REAL статус — что включено в реальную торговлю\n"
             "⚙️ Настройки — живая панель монет\n"
             "❔ Помощь — эта инструкция\n\n"
             "Выбирай раздел кнопками меню."

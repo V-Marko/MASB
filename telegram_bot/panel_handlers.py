@@ -69,7 +69,6 @@ async def _push_coin(
     photo: bytes,
     caption: str,
 ) -> None:
-    """Обновить сообщение монеты на месте; если его нет — отправить новое."""
     global _PANEL_RATE_LIMIT_UNTIL
     for attempt in range(2):
         message_id = get_panel_messages().get(symbol)
