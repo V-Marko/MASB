@@ -28,6 +28,7 @@ STATE_FILE = DATA_DIR / "real_orders.json"
 STRATEGY_ALLOWLIST: set[str] = set()  # Legacy constant; per-strategy state is authoritative.
 MAX_OPEN_POSITIONS = 2
 MAX_LEVERAGE = 5
+DEFAULT_STRATEGY_MARGIN_USDT = 10.0  # fixed margin per strategy REAL trade
 RISK_PERCENT = 1.0
 DEFAULT_REAL_CAPITAL_USDT = 100.0
 COMMISSION_PER_SIDE = 0.00055
@@ -38,6 +39,18 @@ _LOCK = threading.RLock()
 
 class BinanceFuturesError(RuntimeError):
     pass
+
+
+
+def _strategy_margin_usdt() -> float:
+    """Fixed margin (USDT) for strategy REAL trades. Override via MASB_STRATEGY_MARGIN_USDT."""
+    try:
+        value = float(os.getenv("MASB_STRATEGY_MARGIN_USDT", str(DEFAULT_STRATEGY_MARGIN_USDT)))
+    except (TypeError, ValueError) as exc:
+        raise BinanceFuturesError("MASB_STRATEGY_MARGIN_USDT должен быть числом") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise BinanceFuturesError("MASB_STRATEGY_MARGIN_USDT должен быть больше нуля")
+    return value
 
 
 def real_trading_enabled() -> bool:
@@ -235,6 +248,39 @@ def _emergency_close(symbol: str, direction: str) -> None:
         logger.critical("Выполнено аварийное закрытие %s после ошибки установки SL/TP", symbol)
 
 
+
+def _attach_protection(record: dict[str, Any]) -> dict[str, Any]:
+    """Place exchange SL/TP after entry is filled (position exists)."""
+    symbol = str(record["symbol"])
+    direction = str(record["direction"]).upper()
+    exit_side = "SELL" if direction == "LONG" else "BUY"
+    sl_price = _round_step(float(record["sl"]), str(_symbol_rules(symbol)["tickSize"]), ROUND_HALF_UP)
+    tp_price = _round_step(float(record["tp"]), str(_symbol_rules(symbol)["tickSize"]), ROUND_HALF_UP)
+    suffix = f"{int(time.time() * 1000) % 10_000_000:07d}"
+    sl_client_id = record.get("sl_client_order_id") or f"MASB_S_{suffix}"
+    tp_client_id = record.get("tp_client_order_id") or f"MASB_T_{suffix}"
+    updates: dict[str, Any] = {
+        "sl_client_order_id": sl_client_id,
+        "tp_client_order_id": tp_client_id,
+    }
+    try:
+        sl_result = _algo_order(symbol, exit_side, "STOP_MARKET", sl_price, sl_client_id)
+        updates["sl_algo_id"] = sl_result.get("algoId")
+    except Exception:
+        logger.exception("Не удалось поставить SL для %s после входа", symbol)
+        updates["protect_error"] = "sl_failed"
+        return updates
+    try:
+        tp_result = _algo_order(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, tp_client_id)
+        updates["tp_algo_id"] = tp_result.get("algoId")
+        updates["protect_pending"] = False
+    except Exception:
+        logger.exception("Не удалось поставить TP для %s после входа", symbol)
+        updates["protect_error"] = "tp_failed"
+        # keep SL; operator can fix TP manually
+    return updates
+
+
 def _algo_order(symbol: str, side: str, order_type: str, trigger_price: str, client_id: str) -> dict[str, Any]:
     return _request("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL",
@@ -252,7 +298,7 @@ def _algo_order(symbol: str, side: str, order_type: str, trigger_price: str, cli
 def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], candle_timestamp: int) -> dict[str, Any]:
     """Submit one real LIMIT entry and exchange-side protective SL/TP orders.
 
-    Only fibZZ10 is allowed. At most one position/order per symbol and two
+    Per-strategy REAL toggle. At most one position/order per symbol and two
     occupied symbols globally. Live execution requires explicit .env opt-in.
     """
     if not strategy_real_enabled(strategy):
@@ -295,13 +341,17 @@ def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], cand
         if used >= MAX_OPEN_POSITIONS:
             raise BinanceFuturesError(f"Достигнут глобальный лимит: {MAX_OPEN_POSITIONS} активные позиции/символа")
 
-        # Keep the strategy's working capital capped at 100 USDT even if the
-        # Binance account has a larger balance. If free balance is lower, use it.
-        balance = min(_account_available_balance(), _configured_capital())
-        max_total_notional = balance * MAX_LEVERAGE
-        available_notional = max_total_notional - current_notional
-        if available_notional <= 0:
-            raise BinanceFuturesError("Исчерпан общий лимит номинала при плече 5x")
+        # Fixed margin + fixed leverage for strategy REAL trades.
+        # qty = (margin * leverage) / entry
+        margin_usdt = _strategy_margin_usdt()
+        lev = MAX_LEVERAGE  # 5x
+        available_balance = _account_available_balance()
+        if margin_usdt > available_balance:
+            raise BinanceFuturesError(
+                f"Недостаточно баланса для стратегии: нужно {margin_usdt:.2f} USDT маржи, "
+                f"доступно {available_balance:.2f} USDT"
+            )
+
         rules = _symbol_rules(symbol)
         if rules.get("status") != "TRADING" or rules.get("quoteAsset") != "USDT":
             raise BinanceFuturesError(f"{symbol} не является активной USDT-M Futures парой")
@@ -316,20 +366,23 @@ def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], cand
         if direction == "SHORT" and not (float(tp_price) < float(entry_price) < float(sl_price)):
             raise BinanceFuturesError("После округления по tickSize нарушился порядок TP/Entry/SL")
 
-        # Recalculate after exchange tick rounding so the rounded order prices
-        # still fit the risk budget including estimated round-trip fees.
-        raw_qty, estimated_risk = _risk_quantity(
-            balance, float(entry_price), float(sl_price), available_notional
-        )
+        notional = margin_usdt * lev
+        raw_qty = notional / float(entry_price)
         quantity = _round_step(raw_qty, str(rules["stepSize"]))
         qty_dec = _decimal(quantity)
-        if qty_dec < _decimal(rules["minQty"]) or qty_dec <= 0:
-            raise BinanceFuturesError(f"Количество {quantity} меньше минимального для {symbol}")
+        min_qty = _decimal(rules["minQty"])
+        min_notional = _decimal(rules.get("minNotional", "5"))
+        if qty_dec <= 0 or qty_dec < min_qty or (qty_dec * _decimal(entry_price)) < min_notional:
+            need_qty = max(float(min_qty), float(min_notional) / float(entry_price))
+            need_qty = float(_decimal(_round_step(need_qty, str(rules["stepSize"]), ROUND_UP)))
+            need_margin = round((need_qty * float(entry_price) / lev) * 1.02 + 0.01, 2)
+            raise BinanceFuturesError(
+                f"Маржа {margin_usdt} USDT при {lev}x слишком мала для {symbol}. "
+                f"Поставьте MASB_STRATEGY_MARGIN_USDT≥{need_margin} в .env"
+            )
         if qty_dec > _decimal(rules["maxQty"]):
             raise BinanceFuturesError(f"Количество превышает максимум Binance для {symbol}")
-        if qty_dec * _decimal(entry_price) < _decimal(rules.get("minNotional", "5")):
-            raise BinanceFuturesError(f"Номинал ордера меньше минимального для {symbol}")
-        # Report risk of the rounded exchange quantity, not the pre-rounded one.
+
         estimated_risk = float(qty_dec) * (
             abs(float(entry_price) - float(sl_price))
             + (float(entry_price) + float(sl_price)) * COMMISSION_PER_SIDE
@@ -354,31 +407,227 @@ def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], cand
             "newOrderRespType": "RESULT",
         }, signed=True)
 
-        sl_result = None
-        tp_result = None
-        try:
-            sl_result = _algo_order(symbol, exit_side, "STOP_MARKET", sl_price, sl_client_id)
-            tp_result = _algo_order(symbol, exit_side, "TAKE_PROFIT_MARKET", tp_price, tp_client_id)
-        except Exception:
-            logger.exception("Не удалось установить обе защитные заявки для %s", symbol)
+        # SL/TP only after position exists (Binance error -4509 otherwise)
+        sl_algo_id = None
+        tp_algo_id = None
+        protect_pending = True
+        status = "PENDING"
+        entry_status = str(entry_result.get("status", ""))
+        if entry_status in {"FILLED", "PARTIALLY_FILLED"}:
             try:
-                _request("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": entry_client_id}, signed=True)
+                prot = _attach_protection({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "sl": float(sl_price),
+                    "tp": float(tp_price),
+                    "sl_client_order_id": sl_client_id,
+                    "tp_client_order_id": tp_client_id,
+                })
+                sl_algo_id = prot.get("sl_algo_id")
+                tp_algo_id = prot.get("tp_algo_id")
+                protect_pending = bool(prot.get("protect_pending", False))
+                if sl_algo_id:
+                    status = "OPEN"
             except Exception:
-                logger.exception("Не удалось отменить входной ордер %s", entry_client_id)
-            # Best-effort cleanup of the conditional order that may have succeeded.
-            if sl_result and sl_result.get("algoId"):
-                try:
-                    _cancel_algo(sl_result["algoId"])
-                except Exception:
-                    logger.exception("Не удалось отменить защитный algo-ордер")
-            try:
-                _emergency_close(symbol, direction)
-            except Exception:
-                logger.critical("ТРЕБУЕТСЯ РУЧНАЯ ПРОВЕРКА ПОЗИЦИИ %s: аварийное закрытие не удалось", symbol, exc_info=True)
-            raise
+                logger.exception("Не удалось сразу навесить SL/TP после fill %s", symbol)
 
         record = {
             "strategy": strategy,
+            "symbol": symbol,
+            "direction": direction,
+            "status": status,
+            "created_at": int(time.time()),
+            "entry": float(entry_price),
+            "tp": float(tp_price),
+            "sl": float(sl_price),
+            "quantity": float(quantity),
+            "estimated_risk_with_fees": float(estimated_risk),
+            "margin_usdt": float(margin_usdt),
+            "notional": float(notional),
+            "risk_budget": float(margin_usdt),
+            "leverage": lev,
+            "entry_order_id": entry_result.get("orderId"),
+            "entry_client_order_id": entry_client_id,
+            "sl_client_order_id": sl_client_id,
+            "tp_client_order_id": tp_client_id,
+            "sl_algo_id": sl_algo_id,
+            "tp_algo_id": tp_algo_id,
+            "protect_pending": protect_pending,
+            "entry_number": int(order.get("entry_number", 1)),
+            "candle_timestamp": int(candle_timestamp),
+        }
+        state = _read_state()
+        state["orders"].append(record)
+        state["orders"] = state["orders"][-1000:]
+        _write_state(state)
+        return record
+
+
+
+def submit_manual_order(
+    symbol: str,
+    direction: str,
+    entry: float,
+    tp: float,
+    sl: float,
+    leverage: int,
+    margin_usdt: float,
+) -> dict[str, Any]:
+    """Place a manual LIMIT entry + exchange SL/TP on Binance Futures (REAL).
+
+    Position size is calculated from user margin and leverage:
+    notional = margin_usdt * leverage
+    quantity = notional / entry
+    """
+    if not real_trading_enabled():
+        raise BinanceFuturesError(
+            "REAL-торговля выключена: установите MASB_REAL_TRADING_ENABLED=true в .env"
+        )
+
+    symbol = symbol.upper().strip()
+    direction = direction.upper().strip()
+    if not symbol.endswith("USDT"):
+        raise BinanceFuturesError("Разрешены только USDT-M Futures пары")
+    if direction not in {"LONG", "SHORT"}:
+        raise BinanceFuturesError("Направление должно быть LONG или SHORT")
+    if not all(math.isfinite(x) and x > 0 for x in (entry, tp, sl, margin_usdt)):
+        raise BinanceFuturesError("Entry / TP / SL / маржа должны быть положительными числами")
+    if direction == "LONG" and not (sl < entry < tp):
+        raise BinanceFuturesError("Для LONG ожидается SL < Entry < TP")
+    if direction == "SHORT" and not (tp < entry < sl):
+        raise BinanceFuturesError("Для SHORT ожидается TP < Entry < SL")
+
+    lev = int(leverage)
+    if lev < 1 or lev > 50:
+        raise BinanceFuturesError("Плечо должно быть от 1 до 50")
+    max_allowed = int(os.getenv("MASB_MANUAL_MAX_LEVERAGE", "20"))
+    if lev > max_allowed:
+        raise BinanceFuturesError(f"Плечо ограничено {max_allowed}x (MASB_MANUAL_MAX_LEVERAGE)")
+
+    max_margin = float(os.getenv("MASB_MANUAL_MAX_MARGIN_USDT", "500"))
+    if margin_usdt > max_margin:
+        raise BinanceFuturesError(
+            f"Маржа ограничена {max_margin} USDT (MASB_MANUAL_MAX_MARGIN_USDT)"
+        )
+    if margin_usdt < 1:
+        raise BinanceFuturesError("Минимальная маржа — 1 USDT")
+
+    with _LOCK:
+        _credentials()
+        _assert_one_way_mode()
+        used, occupied_symbols, current_notional = _global_usage()
+        if symbol in occupied_symbols:
+            raise BinanceFuturesError(f"{symbol}: уже есть открытая позиция или ожидающий REAL-вход")
+        if used >= MAX_OPEN_POSITIONS:
+            raise BinanceFuturesError(
+                f"Достигнут глобальный лимит: {MAX_OPEN_POSITIONS} активные позиции/символа"
+            )
+
+        available_balance = _account_available_balance()
+        if margin_usdt > available_balance:
+            raise BinanceFuturesError(
+                f"Недостаточно свободного баланса: нужно {margin_usdt:.2f} USDT, "
+                f"доступно {available_balance:.2f} USDT"
+            )
+
+        rules = _symbol_rules(symbol)
+        step = str(rules["stepSize"])
+        min_qty = float(rules.get("minQty") or step)
+        min_notional = float(rules.get("minNotional") or 5)
+
+        notional = margin_usdt * lev
+        raw_qty = notional / entry
+        quantity = _round_step(raw_qty, step)
+        qty_f = float(_decimal(quantity))
+
+        # If rounding wiped the size, or below exchange minimums — tell exact min margin
+        if qty_f <= 0 or qty_f < min_qty or (qty_f * entry) < min_notional:
+            need_qty = max(min_qty, min_notional / entry)
+            # round need_qty UP to step so order is valid
+            need_qty_str = _round_step(need_qty, step, ROUND_UP)
+            need_qty = float(_decimal(need_qty_str))
+            if need_qty <= 0:
+                need_qty = min_qty
+            need_notional = need_qty * entry
+            need_margin = need_notional / lev
+            # small buffer for float/rounding
+            need_margin = round(need_margin * 1.02 + 0.01, 2)
+            raise BinanceFuturesError(
+                "Размер позиции слишком маленький для этой монеты.\n"
+                f"step={step}, minQty={min_qty}, minNotional≈{min_notional} USDT.\n"
+                f"При Entry={entry} и плече {lev}x поставьте маржу минимум ≈ {need_margin} USDT "
+                f"(номинал ≈ {need_notional:.2f} USDT)."
+            )
+
+        # Estimate risk at SL (for display / logging)
+        risk_per_unit = abs(entry - sl) + (entry + sl) * COMMISSION_PER_SIDE
+        estimated_risk = qty_f * risk_per_unit
+
+        entry_price = _round_step(entry, str(rules["tickSize"]), ROUND_HALF_UP)
+        tp_price = _round_step(tp, str(rules["tickSize"]), ROUND_HALF_UP)
+        sl_price = _round_step(sl, str(rules["tickSize"]), ROUND_HALF_UP)
+
+        side = "BUY" if direction == "LONG" else "SELL"
+        exit_side = "SELL" if direction == "LONG" else "BUY"
+
+        suffix = f"{int(time.time() * 1000) % 10_000_000:07d}"
+        entry_client_id = f"MASB_M_E_{suffix}"
+        sl_client_id = f"MASB_M_S_{suffix}"
+        tp_client_id = f"MASB_M_T_{suffix}"
+
+        # Set requested leverage
+        _request(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": symbol, "leverage": lev},
+            signed=True,
+        )
+
+        # Only LIMIT entry now. SL/TP with closePosition require an open position
+        # on Binance (-4509 if placed before fill). Protective orders are attached
+        # in sync_real_order_states() once the entry fills.
+        entry_result = _request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "quantity": quantity,
+                "price": entry_price,
+                "newClientOrderId": entry_client_id,
+                "newOrderRespType": "RESULT",
+            },
+            signed=True,
+        )
+
+        sl_algo_id = None
+        tp_algo_id = None
+        protect_pending = True
+        status = "PENDING"
+        # If limit filled immediately — attach protection now
+        entry_status = str(entry_result.get("status", ""))
+        if entry_status in {"FILLED", "PARTIALLY_FILLED"}:
+            try:
+                prot = _attach_protection({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "sl": float(sl_price),
+                    "tp": float(tp_price),
+                    "sl_client_order_id": sl_client_id,
+                    "tp_client_order_id": tp_client_id,
+                })
+                sl_algo_id = prot.get("sl_algo_id")
+                tp_algo_id = prot.get("tp_algo_id")
+                protect_pending = bool(prot.get("protect_pending", False))
+                if sl_algo_id:
+                    status = "OPEN"
+            except Exception:
+                logger.exception("Не удалось сразу навесить SL/TP после мгновенного fill %s", symbol)
+
+        record = {
+            "strategy": "MANUAL",
             "symbol": symbol,
             "direction": direction,
             "status": "PENDING",
@@ -388,15 +637,23 @@ def submit_signal_order(strategy: str, symbol: str, signal: dict[str, Any], cand
             "sl": float(sl_price),
             "quantity": float(quantity),
             "estimated_risk_with_fees": float(estimated_risk),
-            "risk_budget": float(balance * RISK_PERCENT / 100.0),
-            "leverage": MAX_LEVERAGE,
+            "margin_usdt": float(margin_usdt),
+            "notional": float(notional),
+            "risk_budget": float(margin_usdt),
+            "leverage": lev,
             "entry_order_id": entry_result.get("orderId"),
             "entry_client_order_id": entry_client_id,
-            "sl_algo_id": sl_result.get("algoId") if sl_result else None,
-            "tp_algo_id": tp_result.get("algoId") if tp_result else None,
-            "entry_number": int(order.get("entry_number", 1)),
-            "candle_timestamp": int(candle_timestamp),
+            "sl_client_order_id": sl_client_id,
+            "tp_client_order_id": tp_client_id,
+            "sl_algo_id": sl_algo_id,
+            "tp_algo_id": tp_algo_id,
+            "protect_pending": protect_pending,
+            "entry_number": 1,
+            "candle_timestamp": 0,
+            "manual": True,
         }
+        # status may already be OPEN if filled instantly
+        record["status"] = status
         state = _read_state()
         state["orders"].append(record)
         state["orders"] = state["orders"][-1000:]
@@ -439,6 +696,15 @@ def sync_real_order_states() -> int:
                     if order_status in {"FILLED", "PARTIALLY_FILLED"} and abs(position_amount) > 0:
                         updates["status"] = "OPEN"
                         updates["filled_quantity"] = float(order.get("executedQty", 0.0))
+                        # Attach SL/TP only after position exists (Binance -4509 otherwise)
+                        if record.get("protect_pending") or not record.get("sl_algo_id"):
+                            try:
+                                updates.update(_attach_protection({**record, **updates}))
+                            except Exception:
+                                logger.exception(
+                                    "Не удалось навесить SL/TP на %s после исполнения входа",
+                                    symbol,
+                                )
                     elif order_status in {"FILLED", "PARTIALLY_FILLED"} and abs(position_amount) == 0:
                         # The position may have hit SL/TP between monitor polls.
                         updates["status"] = "CLOSED"

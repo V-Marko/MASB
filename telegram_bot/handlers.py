@@ -18,6 +18,7 @@ from telegram_bot.keyboards import (
     BTN_BALANCE,
     BTN_ACTIVE_TRADES,
     BTN_STRATEGIES,
+    BTN_TRADE,
     BTN_SETTINGS,
     BTN_HELP,
     BTN_HOME,
@@ -404,6 +405,11 @@ async def menu_handler(
     text = message.text.strip()
 
     if text not in MAIN_MENU_BUTTONS:
+        return
+
+    # 🔴 Trade обрабатывается ConversationHandler в trade_handlers
+    from telegram_bot.keyboards import BTN_TRADE
+    if text == BTN_TRADE:
         return
 
     await show_section(

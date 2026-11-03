@@ -12,6 +12,7 @@ from telegram.request import HTTPXRequest
 from telegram_bot.handlers import register_handlers
 from telegram_bot.strategy_handlers import register_strategy_handlers
 from telegram_bot.panel_handlers import register_panel_handlers
+from telegram_bot.trade_handlers import register_trade_handlers
 
 
 # ============================================================
@@ -164,6 +165,7 @@ def build_application() -> Application:
         .build()
     )
 
+    register_trade_handlers(application)
     register_handlers(application)
     register_strategy_handlers(application)
     register_panel_handlers(application)

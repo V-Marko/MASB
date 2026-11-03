@@ -324,7 +324,12 @@ def strategy_details_text(name: str) -> str:
     notify_status = "ВКЛЮЧЕНЫ" if notify else "ВЫКЛЮЧЕНЫ"
     stats = trade_stats(name)
     real_mode = strategy_real_enabled(name)
-    trading_mode = "🔴 REAL разрешён для этой стратегии" if real_mode else "🧪 DEMO — реальные ордера запрещены"
+    import os
+    margin = os.getenv("MASB_STRATEGY_MARGIN_USDT", "10")
+    if real_mode:
+        trading_mode = f"🔴 REAL: маржа {margin} USDT, плечо 5x"
+    else:
+        trading_mode = "🧪 DEMO — реальные ордера запрещены"
 
     error = info.get("last_error")
     error_text = str(error)[:300] if error else "нет"
@@ -333,6 +338,7 @@ def strategy_details_text(name: str) -> str:
         f"📌 Стратегия: {name}",
         "",
         f"Статус: {status}",
+        f"Режим: {trading_mode}",
         f"Уведомления: {notify_status}",
         f"Сигналов обнаружено: {info.get('signals', 0)}",
         "",
@@ -952,11 +958,21 @@ async def strategy_callback(
             return
 
         mode_text = "🔴 REAL разрешён" if not current_real else "🧪 DEMO включён"
+        extra = ""
+        if not current_real:
+            import os
+            margin = os.getenv("MASB_STRATEGY_MARGIN_USDT", "10")
+            extra = (
+                f"\n\nПараметры REAL-сделок:\n"
+                f"• Маржа: {margin} USDT (MASB_STRATEGY_MARGIN_USDT)\n"
+                f"• Плечо: 5x\n"
+                f"• Нужен MASB_REAL_TRADING_ENABLED=true в .env"
+            )
         await query.edit_message_text(
             text=(
                 f"{strategy_details_text(name)}\n\n"
-                f"✅ Режим изменён: {mode_text}.\n"
-                "Глобальное включение REAL всё равно зависит от MASB_REAL_TRADING_ENABLED."
+                f"✅ Режим изменён: {mode_text}."
+                f"{extra}"
             ),
             reply_markup=strategy_keyboard(name),
         )

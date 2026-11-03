@@ -5,6 +5,7 @@ BTN_STATUS = "📊 Состояние"
 BTN_BALANCE = "💰 Баланс"
 BTN_ACTIVE_TRADES = "📈 Active trades"
 BTN_STRATEGIES = "🧩 Стратегии"
+BTN_TRADE = "🔴 Trade"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❔ Помощь"
 BTN_HOME = "⬅️ Главное меню"
@@ -14,6 +15,7 @@ MAIN_MENU_BUTTONS = {
     BTN_BALANCE,
     BTN_ACTIVE_TRADES,
     BTN_STRATEGIES,
+    BTN_TRADE,
     BTN_SETTINGS,
     BTN_HELP,
     BTN_HOME,
@@ -32,6 +34,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(BTN_STRATEGIES),
             ],
             [
+                KeyboardButton(BTN_TRADE),
                 KeyboardButton(BTN_SETTINGS),
             ],
             [
@@ -42,5 +45,6 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=False,
         is_persistent=True,
         selective=False,
-        input_field_placeholder="Состояние • Баланс • Active trades • Стратегии • Настройки",
+        input_field_placeholder="Состояние • Баланс • Active trades • Стратегии • Trade • Настройки",
     )
+
