@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -15,6 +14,8 @@ from core.risk_management import calculate_sl
 
 NAME = "fibZZ5"
 ZIGZAG_DEVIATION = 5.0
+# ZigZag старшего порядка для определения глобального тренда
+TREND_ZIGZAG_DEVIATION = 15.0
 
 INITIAL_CAPITAL = 100.0
 POSITION_CAPITAL_PERCENT = 50.0
@@ -219,15 +220,29 @@ def _make_order(
     return result
 
 
-# ============================================================
-# STRATEGY ANALYSIS
-#
-# Input candles must be chronological.
-# Only confirmed ZigZag swings are used.
-#
-# This function creates signal proposals; it does not place
-# real exchange orders or simulate fills.
-# ============================================================
+def get_global_trend(
+    candles: Sequence[dict[str, Any]],
+    deviation: float,
+) -> str | None:
+    swings = find_confirmed_swings(
+        candles,
+        deviation_percent=deviation,
+    )
+
+    highs = [float(s.price) for s in swings if s.kind == "HIGH"]
+    lows = [float(s.price) for s in swings if s.kind == "LOW"]
+
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+
+    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+        return "LONG"
+
+    if highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+        return "SHORT"
+
+    return None
+
 
 def analyze(
     candles: Sequence[dict[str, Any]],
@@ -253,7 +268,6 @@ def analyze(
     if open_positions < 0 or pending_orders < 0:
         raise ValueError("Количество позиций и ордеров не может быть отрицательным.")
 
-    # Find confirmed ZigZag swings.
     swings = find_confirmed_swings(
         candles,
         deviation_percent=ZIGZAG_DEVIATION,
@@ -268,7 +282,6 @@ def analyze(
     if first_swing.kind == last_swing.kind:
         return None
 
-    # Confirmed impulse direction.
     if first_swing.kind == "LOW" and last_swing.kind == "HIGH":
         direction = "LONG"
 
@@ -278,24 +291,26 @@ def analyze(
     else:
         return None
 
+    global_trend = get_global_trend(candles, TREND_ZIGZAG_DEVIATION)
+
+    if global_trend is None or global_trend != direction:
+        return None
+
     swing_start = float(first_swing.price)
     swing_end = float(last_swing.price)
 
-    # Do not trade an invalidated structure.
     if direction == "LONG" and current_price <= swing_start:
         return None
 
     if direction == "SHORT" and current_price >= swing_start:
         return None
 
-    # Ordinary Fibonacci retracement levels.
     fibs = fibonacci_levels(
         swing_start,
         swing_end,
         levels=(0.382, 0.500, 0.618, 0.805),
     )
 
-    # Trend-direction extension targets.
     green_fibs = calculate_green_fibonacci(
         swing_start,
         swing_end,
@@ -327,7 +342,6 @@ def analyze(
             "is_green_tp": True,
         })
 
-    # Maximum two entries by default.
     remaining_slots = max(
         0,
         MAX_ENTRIES - open_positions - pending_orders,
@@ -345,8 +359,6 @@ def analyze(
             definition["entry_fib"],
         )
 
-        # Do not place a limit order if price has already
-        # reached or crossed the entry when the setup is checked.
         if direction == "LONG" and current_price <= entry:
             continue
 
@@ -408,13 +420,12 @@ def analyze(
     result["rr"] = RISK_REWARD
     result["max_entries"] = MAX_ENTRIES
     result["entry_3_enabled"] = ENABLE_ENTRY_3
+    result["global_trend"] = global_trend
+    result["trend_zigzag_deviation"] = TREND_ZIGZAG_DEVIATION
 
     return result
 
 
-# ============================================================
-# TELEGRAM-FRIENDLY FORMAT
-# ============================================================
 
 def format_signal(signal: dict[str, Any] | None) -> str:
     if signal is None:

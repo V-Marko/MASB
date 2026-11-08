@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -11,6 +10,7 @@ from core.risk_management import calculate_sl
 
 NAME = "fibZZ10"
 ZIGZAG_DEVIATION = 10.0
+TREND_ZIGZAG_DEVIATION = 30.0
 
 INITIAL_CAPITAL = 100.0
 RISK_PERCENT = 1.0
@@ -31,9 +31,7 @@ TP_3_GREEN_FIB = 0.382
 MAX_ENTRIES = 2
 
 
-# ============================================================
-# DATA MODELS
-# ============================================================
+
 
 @dataclass
 class LimitOrder:
@@ -66,10 +64,6 @@ class StrategySignal:
     cancelled_reason: str | None = None
 
 
-# ============================================================
-# CANDLE NORMALIZATION
-# Compatible with core.zigzag.py from this project.
-# ============================================================
 
 def _normalize_candles(
     candles: Sequence[dict[str, Any]],
@@ -92,14 +86,6 @@ def _normalize_candles(
     return normalized
 
 
-# ============================================================
-# GREEN FIBONACCI
-#
-# Green 0.382 = ordinary Fib 0.618 + 0.382 * impulse
-# Green 0.618 = ordinary Fib 0.618 + 0.618 * impulse
-#
-# Addition follows the direction of the impulse.
-# ============================================================
 
 def calculate_green_fibonacci(
     swing_start: float,
@@ -132,12 +118,6 @@ def calculate_green_fibonacci(
     }
 
 
-# ============================================================
-# CAPITAL MANAGEMENT
-#
-# Position size is calculated from a 1% cash risk budget, including
-# estimated entry/exit commissions. Notional is capped at 5x capital.
-# ============================================================
 
 def calculate_position(
     capital: float,
@@ -181,9 +161,7 @@ def calculate_position(
     }
 
 
-# ============================================================
-# ORDER CREATION
-# ============================================================
+
 
 def _make_order(
     entry_number: int,
@@ -235,15 +213,32 @@ def _make_order(
     return result
 
 
-# ============================================================
-# STRATEGY ANALYSIS
-#
-# Input candles must be chronological.
-# Only confirmed ZigZag swings are used.
-#
-# This function creates signal proposals; it does not place
-# real exchange orders or simulate fills.
-# ============================================================
+
+
+def get_global_trend(
+    candles: Sequence[dict[str, Any]],
+    deviation: float,
+) -> str | None:
+    swings = find_confirmed_swings(
+        candles,
+        deviation_percent=deviation,
+    )
+
+    highs = [float(s.price) for s in swings if s.kind == "HIGH"]
+    lows = [float(s.price) for s in swings if s.kind == "LOW"]
+
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+
+    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+        return "LONG"
+
+    if highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+        return "SHORT"
+
+    return None
+
+
 
 def analyze(
     candles: Sequence[dict[str, Any]],
@@ -269,7 +264,6 @@ def analyze(
     if open_positions < 0 or pending_orders < 0:
         raise ValueError("Количество позиций и ордеров не может быть отрицательным.")
 
-    # Find confirmed ZigZag swings.
     swings = find_confirmed_swings(
         candles,
         deviation_percent=ZIGZAG_DEVIATION,
@@ -284,7 +278,6 @@ def analyze(
     if first_swing.kind == last_swing.kind:
         return None
 
-    # Confirmed impulse direction.
     if first_swing.kind == "LOW" and last_swing.kind == "HIGH":
         direction = "LONG"
 
@@ -292,6 +285,11 @@ def analyze(
         direction = "SHORT"
 
     else:
+        return None
+
+    global_trend = get_global_trend(candles, TREND_ZIGZAG_DEVIATION)
+
+    if global_trend is None or global_trend != direction:
         return None
 
     swing_start = float(first_swing.price)
@@ -425,6 +423,8 @@ def analyze(
     result["rr"] = RISK_REWARD
     result["max_entries"] = MAX_ENTRIES
     result["entry_3_enabled"] = ENABLE_ENTRY_3
+    result["global_trend"] = global_trend
+    result["trend_zigzag_deviation"] = TREND_ZIGZAG_DEVIATION
 
     return result
 

@@ -26,7 +26,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 BASE_URL = "https://fapi.binance.com"
 STATE_FILE = DATA_DIR / "real_orders.json"
 STRATEGY_ALLOWLIST: set[str] = set()  # Legacy constant; per-strategy state is authoritative.
-MAX_OPEN_POSITIONS = 2
+MAX_OPEN_POSITIONS = 7
 MAX_LEVERAGE = 5
 DEFAULT_STRATEGY_MARGIN_USDT = 10.0  # fixed margin per strategy REAL trade
 RISK_PERCENT = 1.0
