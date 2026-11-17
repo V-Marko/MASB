@@ -8,13 +8,17 @@ from core.fibonacci import fibo_price, fibonacci_levels
 from core.risk_management import calculate_sl
 
 
+# ============================================================
+# STRATEGY 1: ZigZag 5% + Fibonacci
+# ============================================================
+
 NAME = "fibZZ10"
 ZIGZAG_DEVIATION = 10.0
-TREND_ZIGZAG_DEVIATION = 30.0
+# ZigZag старшего порядка для определения глобального тренда
+TREND_ZIGZAG_DEVIATION = 10.0
 
 INITIAL_CAPITAL = 100.0
-RISK_PERCENT = 1.0
-MAX_LEVERAGE = 5
+POSITION_CAPITAL_PERCENT = 50.0
 COMMISSION_PER_SIDE = 0.00055
 RISK_REWARD = 3.0
 
@@ -22,7 +26,7 @@ ENTRY_1_FIB = 0.805
 TP_1_FIB = 0.500
 
 ENTRY_2_FIB = 0.618
-TP_2_GREEN_FIB = 0.382
+TP_2_GREEN_FIB = 0.5
 
 ENABLE_ENTRY_3 = False
 ENTRY_3_FIB = 0.382
@@ -31,7 +35,9 @@ TP_3_GREEN_FIB = 0.382
 MAX_ENTRIES = 2
 
 
-
+# ============================================================
+# DATA MODELS
+# ============================================================
 
 @dataclass
 class LimitOrder:
@@ -64,6 +70,10 @@ class StrategySignal:
     cancelled_reason: str | None = None
 
 
+# ============================================================
+# CANDLE NORMALIZATION
+# Compatible with core.zigzag.py from this project.
+# ============================================================
 
 def _normalize_candles(
     candles: Sequence[dict[str, Any]],
@@ -86,6 +96,14 @@ def _normalize_candles(
     return normalized
 
 
+# ============================================================
+# GREEN FIBONACCI
+#
+# Green 0.382 = ordinary Fib 0.618 + 0.382 * impulse
+# Green 0.618 = ordinary Fib 0.618 + 0.618 * impulse
+#
+# Addition follows the direction of the impulse.
+# ============================================================
 
 def calculate_green_fibonacci(
     swing_start: float,
@@ -110,58 +128,50 @@ def calculate_green_fibonacci(
     )
 
     green_382 = fib_618 + direction * 0.382 * impulse_size
+    green_500 = fib_618 + direction * 0.500 * impulse_size
     green_618 = fib_618 + direction * 0.618 * impulse_size
 
     return {
         0.382: green_382,
+        0.5: green_500,
         0.618: green_618,
     }
 
 
+# ============================================================
+# CAPITAL MANAGEMENT
+#
+# Position notional = 50% of current capital.
+# No leverage is applied here.
+# ============================================================
 
 def calculate_position(
     capital: float,
     entry: float,
-    sl: float,
 ) -> dict[str, float]:
-    """Размер позиции от денежного риска, а не от процента маржи.
-
-    Риск включает оценку комиссии входа и выхода. Плечо ограничивает
-    номинал позиции, но не увеличивает допустимый убыток.
-    """
     capital = float(capital)
     entry = float(entry)
-    sl = float(sl)
 
-    if capital <= 0 or entry <= 0 or sl <= 0 or entry == sl:
-        raise ValueError("Капитал, Entry и SL должны быть корректными положительными ценами.")
+    if capital <= 0:
+        raise ValueError("Капитал должен быть больше нуля.")
 
-    risk_budget = capital * RISK_PERCENT / 100.0
-    stop_distance = abs(entry - sl)
-    fee_per_unit = (entry + sl) * COMMISSION_PER_SIDE
-    risk_per_unit = stop_distance + fee_per_unit
-    if risk_per_unit <= 0:
-        raise ValueError("Некорректный риск на единицу количества.")
+    if entry <= 0:
+        raise ValueError("Entry должен быть больше нуля.")
 
-    quantity = risk_budget / risk_per_unit
-    max_notional = capital * MAX_LEVERAGE
-    max_quantity = max_notional / entry
-    quantity = min(quantity, max_quantity)
-    position_value = quantity * entry
+    position_value = capital * POSITION_CAPITAL_PERCENT / 100.0
+    quantity = position_value / entry
 
     return {
         "capital": capital,
-        "risk_budget": risk_budget,
-        "estimated_total_risk": quantity * risk_per_unit,
         "position_value": position_value,
         "quantity": quantity,
         "estimated_entry_fee": position_value * COMMISSION_PER_SIDE,
-        "estimated_exit_fee": quantity * sl * COMMISSION_PER_SIDE,
-        "max_leverage": float(MAX_LEVERAGE),
     }
 
 
-
+# ============================================================
+# ORDER CREATION
+# ============================================================
 
 def _make_order(
     entry_number: int,
@@ -190,7 +200,6 @@ def _make_order(
     position = calculate_position(
         capital=capital,
         entry=entry,
-        sl=sl,
     )
 
     order = LimitOrder(
@@ -211,8 +220,6 @@ def _make_order(
     result["rr"] = RISK_REWARD
 
     return result
-
-
 
 
 def get_global_trend(
@@ -237,7 +244,6 @@ def get_global_trend(
         return "SHORT"
 
     return None
-
 
 
 def analyze(
@@ -295,21 +301,18 @@ def analyze(
     swing_start = float(first_swing.price)
     swing_end = float(last_swing.price)
 
-    # Do not trade an invalidated structure.
     if direction == "LONG" and current_price <= swing_start:
         return None
 
     if direction == "SHORT" and current_price >= swing_start:
         return None
 
-    # Ordinary Fibonacci retracement levels.
     fibs = fibonacci_levels(
         swing_start,
         swing_end,
         levels=(0.382, 0.500, 0.618, 0.805),
     )
 
-    # Trend-direction extension targets.
     green_fibs = calculate_green_fibonacci(
         swing_start,
         swing_end,
@@ -341,7 +344,6 @@ def analyze(
             "is_green_tp": True,
         })
 
-    # Maximum two entries by default.
     remaining_slots = max(
         0,
         MAX_ENTRIES - open_positions - pending_orders,
@@ -359,8 +361,6 @@ def analyze(
             definition["entry_fib"],
         )
 
-        # Do not place a limit order if price has already
-        # reached or crossed the entry when the setup is checked.
         if direction == "LONG" and current_price <= entry:
             continue
 
@@ -418,8 +418,7 @@ def analyze(
     result["capital"] = float(capital)
     result["commission_per_side"] = COMMISSION_PER_SIDE
     result["initial_capital"] = INITIAL_CAPITAL
-    result["risk_percent"] = RISK_PERCENT
-    result["max_leverage"] = MAX_LEVERAGE
+    result["position_capital_percent"] = POSITION_CAPITAL_PERCENT
     result["rr"] = RISK_REWARD
     result["max_entries"] = MAX_ENTRIES
     result["entry_3_enabled"] = ENABLE_ENTRY_3
@@ -429,14 +428,11 @@ def analyze(
     return result
 
 
-# ============================================================
-# TELEGRAM-FRIENDLY FORMAT
-# ============================================================
 
 def format_signal(signal: dict[str, Any] | None) -> str:
     if signal is None:
         return (
-            "📐 fibZZ10\n\n"
+            "📐 fibZZ5\n\n"
             "Нет нового подходящего сетапа.\n"
             "Ожидается подтверждённая структура ZigZag."
         )
@@ -445,7 +441,7 @@ def format_signal(signal: dict[str, Any] | None) -> str:
     orders = signal["orders"]
 
     lines = [
-        "📐 MASB — fibZZ10",
+        "📐 MASB — fibZZ5",
         "",
         f"Направление: {direction}",
         f"ZigZag: {signal['zigzag_deviation']}%",
@@ -500,8 +496,7 @@ if __name__ == "__main__":
     print(f"Стратегия {NAME}")
     print(f"ZigZag: {ZIGZAG_DEVIATION}%")
     print(f"Начальный капитал: {INITIAL_CAPITAL} USDT")
-    print(f"Риск на сделку: {RISK_PERCENT}%")
-    print(f"Максимальное плечо: {MAX_LEVERAGE}x")
+    print(f"Размер позиции: {POSITION_CAPITAL_PERCENT}%")
     print(f"RR: 1:{RISK_REWARD}")
     print(f"Комиссия за сторону: {COMMISSION_PER_SIDE * 100:.3f}%")
     print(f"Максимум входов: {MAX_ENTRIES}")

@@ -15,7 +15,7 @@ from core.risk_management import calculate_sl
 NAME = "fibZZ5"
 ZIGZAG_DEVIATION = 5.0
 # ZigZag старшего порядка для определения глобального тренда
-TREND_ZIGZAG_DEVIATION = 15.0
+TREND_ZIGZAG_DEVIATION = 5.0
 
 INITIAL_CAPITAL = 100.0
 POSITION_CAPITAL_PERCENT = 50.0
@@ -26,7 +26,7 @@ ENTRY_1_FIB = 0.805
 TP_1_FIB = 0.500
 
 ENTRY_2_FIB = 0.618
-TP_2_GREEN_FIB = 0.382
+TP_2_GREEN_FIB = 0.5
 
 ENABLE_ENTRY_3 = False
 ENTRY_3_FIB = 0.382
@@ -128,10 +128,12 @@ def calculate_green_fibonacci(
     )
 
     green_382 = fib_618 + direction * 0.382 * impulse_size
+    green_500 = fib_618 + direction * 0.500 * impulse_size
     green_618 = fib_618 + direction * 0.618 * impulse_size
 
     return {
         0.382: green_382,
+        0.5: green_500,
         0.618: green_618,
     }
 

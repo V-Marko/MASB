@@ -42,6 +42,7 @@ from services.strategy_manager import (
 )
 
 from strategy.registry import discover_strategies
+from core.setup_filter import filter_signal_orders
 from services.trade_monitor import (
     active_trades,
     add_signal_orders,
@@ -1375,6 +1376,26 @@ async def _scan_strategy(
             set_last_candle(name, symbol, timestamp)
             if signal is None or not signal.get("orders"):
                 continue
+
+            # Единый фильтр для ВСЕХ стратегий: не допускаем Entry дальше 5%
+            # от рынка, LIMIT на неправильной стороне и слабое соотношение RR.
+            signal, rejected_orders = filter_signal_orders(
+                signal,
+                float(last_candle["close"]),
+                max_entry_distance_pct=5.0,
+                min_reward_risk=1.5,
+            )
+            if signal is None:
+                logger.info(
+                    "Сигнал %s/%s отклонён общим фильтром: %s",
+                    name, symbol, "; ".join(rejected_orders),
+                )
+                continue
+            if rejected_orders:
+                logger.debug(
+                    "Часть ордеров %s/%s отклонена: %s",
+                    name, symbol, "; ".join(rejected_orders),
+                )
 
             if strategy_real_enabled(name) and not signal.get("signal_only"):
                 if not real_trading_enabled():

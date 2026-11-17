@@ -54,8 +54,7 @@ LOG_DIR = ROOT / "logs"
 
 
 class Tee:
-    """Выводит в консоль как обычно и дублирует всё в txt файл.
-    Прогресс-бары (\\r) в файле сохраняются одной итоговой строкой."""
+
 
     def __init__(self, console, file):
         self.console = console
@@ -1248,3 +1247,5 @@ if __name__ == "__main__":
         sys.stderr = original_stderr
         log_file.close()
         print(f"Лог сохранён: {log_path}")
+
+

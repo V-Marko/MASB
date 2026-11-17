@@ -17,7 +17,7 @@ ATR_PERIOD = 14
 INITIAL_SL_ATR = 2.5
 TRAILING_ATR = 2.8
 MAX_HOLD_HOURS = 72
-TP_ATR_CAP = 12.0
+TP_ATR_CAP = 6.0
 
 
 def _ema(values: Sequence[float], period: int) -> list[float]:
@@ -118,11 +118,11 @@ def analyze(
     rising = ema50[i] > ema50[i - 3]
     falling = ema50[i] < ema50[i - 3]
 
-    if close > ema50[i] > ema200[i] and rising:
-        direction = "LONG"
-        sl = close - INITIAL_SL_ATR * volatility
-        tp = close + TP_ATR_CAP * volatility
-    elif close < ema50[i] < ema200[i] and falling:
+    # if close > ema50[i] > ema200[i] and rising:
+    #     direction = "LONG"
+    #     sl = close - INITIAL_SL_ATR * volatility
+    #     tp = close + TP_ATR_CAP * volatility
+    if close < ema50[i] < ema200[i] and falling:
         direction = "SHORT"
         sl = close + INITIAL_SL_ATR * volatility
         tp = close - TP_ATR_CAP * volatility
@@ -146,6 +146,8 @@ def analyze(
     order = {
         "entry_number": 1,
         "direction": direction,
+        "order_type": "MARKET",
+        "entry_type": "MARKET",
         "entry": close,
         "tp": tp,
         "sl": sl,

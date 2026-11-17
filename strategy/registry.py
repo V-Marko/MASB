@@ -10,7 +10,7 @@ from typing import Any, Callable
 logger = logging.getLogger("MASB.Registry")
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_SKIP = {"registry"}
+_SKIP = {"registry", "strategy_handlers", "trade_monitor"}
 
 
 def _default_format(signal: dict[str, Any] | None) -> str:
